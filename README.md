@@ -195,6 +195,8 @@ curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$
 
 切换节点时，`qie` 不会把落地机客户端配置整体覆盖到 `/etc/s-box/sb.json`。它会读取当前运行配置，保留原有 `inbounds`、已有 `outbounds` 和 `route.rules`，只替换由 `qie` 管理的 `qie-proxy` 出口，并把 `route.final` 指向当前落地机。切回 Direct 时只把 `route.final` 改回 `direct`。
 
+切换到落地机并重启 `sing-box` 后，`qie` 会临时启动一个 sing-box 客户端，通过该落地机访问 `https://www.gstatic.com/generate_204`。如果出站检测失败或超时，会自动把当前配置回退到 Direct 并重启 `sing-box`。
+
 如果重启 `sing-box` 失败，`qie` 会尝试回滚到切换前的配置。
 
 ## 用法

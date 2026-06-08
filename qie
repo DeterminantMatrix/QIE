@@ -18,7 +18,7 @@ STATE = CDIR + '/qie_state'
 NODES_DIR = CDIR + '/qie_nodes'
 INDEX = CDIR + '/qie_nodes.json'
 CDIRECT = CDIR + '/sb_direct.json'
-VERSION = '2026.06.09-6'
+VERSION = '2026.06.09-7'
 QIE_OUT_TAG = 'qie-proxy'
 QIE_DIRECT_TAG = 'direct'
 PROBE_URL = 'https://www.gstatic.com/generate_204'
@@ -582,6 +582,15 @@ def fmt_outbound_probe(value, error):
     return f'出站: {value:.0f}ms'
 
 
+def verify_node_outbound(node):
+    value, error = outbound_probe_latency(node)
+    if error in ('缺 sing-box', '缺 curl'):
+        return None, fmt_outbound_probe(value, error)
+    if error or value is None:
+        return False, fmt_outbound_probe(value, error)
+    return True, fmt_outbound_probe(value, error)
+
+
 def has_direct_outbound(data):
     outs = data.get('outbounds', [])
     if not isinstance(outs, list):
@@ -828,6 +837,39 @@ def switch_to_path(state, label, src):
     sys.exit(1)
 
 
+def fallback_to_direct(rollback=None):
+    print('出站检测失败，回退 Direct ...', end=' ', flush=True)
+    try:
+        data = build_runtime_config('DIRECT')
+        tmp = CRUN + '.tmp'
+        save_json(tmp, data)
+        if not validate_config(tmp):
+            raise RuntimeError('Direct 配置校验失败')
+        os.replace(tmp, CRUN)
+        if restart_sb():
+            save_state('DIRECT')
+            print('OK')
+            if rollback and os.path.exists(rollback):
+                os.remove(rollback)
+            cleanup_qie_residue()
+            return True
+        print('失败')
+    except Exception as e:
+        print('失败 - ' + str(e))
+
+    if rollback and os.path.exists(rollback):
+        print('尝试恢复切换前配置 ...', end=' ', flush=True)
+        atomic_copy(rollback, CRUN)
+        os.remove(rollback)
+        if restart_sb():
+            print('OK')
+        else:
+            print('失败')
+
+    cleanup_qie_residue()
+    return False
+
+
 def switch_runtime(state, label, node=None):
     rollback = None
     if os.path.exists(CRUN):
@@ -848,8 +890,19 @@ def switch_runtime(state, label, node=None):
     os.replace(tmp, CRUN)
 
     if restart_sb():
-        save_state(state)
         print('OK')
+        if state != 'DIRECT' and node:
+            print('检测落地机出站 ...', end=' ', flush=True)
+            ok, detail = verify_node_outbound(node)
+            print(detail)
+            if ok is False:
+                if not fallback_to_direct(rollback):
+                    sys.exit(1)
+                return
+            if ok is None:
+                print('提示: 无法完成出站检测，保留当前切换。')
+
+        save_state(state)
         if rollback and os.path.exists(rollback):
             os.remove(rollback)
         cleanup_qie_residue()
