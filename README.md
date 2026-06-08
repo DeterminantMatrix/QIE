@@ -164,6 +164,14 @@ curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$
 curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node -p 8443
 ```
 
+如果落地机有端口映射，例如公网 UDP `18443` 转发到本机 `8443`，导出时需要指定原机器实际连接的公网端口：
+
+```sh
+curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node -p 8443 --connect-port 18443
+```
+
+如果未检测到 hy2，`luodi` 在交互安装独立 Hysteria2 时会询问本机监听端口和公网连接端口。
+
 ## 前置条件
 
 - 原机器和落地机都需要 `python3`

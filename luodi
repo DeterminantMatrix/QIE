@@ -4,6 +4,9 @@ set -eu
 NAME=""
 CONFIG="/etc/hysteria/config.yaml"
 PORT="8443"
+PORT_SET=0
+CONNECT_PORT=""
+CONNECT_PORT_SET=0
 SERVER=""
 PASSWORD=""
 SNI="qie.local"
@@ -20,6 +23,7 @@ usage() {
   -n, --name NAME          qie 菜单中显示的节点名称
   -c, --config FILE        Hysteria2 服务端配置路径，默认 /etc/hysteria/config.yaml
   -p, --port PORT          Hysteria2 监听端口，默认 8443
+  --connect-port PORT      原机器连接落地机时使用的公网 UDP 端口，默认等于监听端口
   --server HOST            原机器连接落地机时使用的公网地址/IP
   --password PASSWORD      Hysteria2 密码；不填则自动生成
   --sni NAME               TLS SNI，默认 qie.local
@@ -101,6 +105,67 @@ ask_node_name() {
   NAME="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo node)"
 }
 
+validate_port() {
+  value="$1"
+  label="$2"
+  case "$value" in
+    *[!0-9]*|'') die "无效${label}: $value" ;;
+  esac
+  if [ "$value" -lt 1 ] || [ "$value" -gt 65535 ]; then
+    die "无效${label}: $value"
+  fi
+}
+
+ask_port_value() {
+  prompt="$1"
+  default="$2"
+
+  if [ "$YES" -eq 1 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+    echo "$default"
+    return
+  fi
+
+  while :; do
+    printf "%s [%s]: " "$prompt" "$default" >/dev/tty
+    IFS= read -r input_port </dev/tty || input_port=""
+    input_port="$(printf "%s" "$input_port" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -n "$input_port" ] || input_port="$default"
+    case "$input_port" in
+      *[!0-9]*|'') echo "端口必须是 1-65535 的数字。" >/dev/tty ;;
+      *)
+        if [ "$input_port" -ge 1 ] && [ "$input_port" -le 65535 ]; then
+          echo "$input_port"
+          return
+        fi
+        echo "端口必须是 1-65535 的数字。" >/dev/tty
+        ;;
+    esac
+  done
+}
+
+ask_install_ports() {
+  if [ "$PORT_SET" -eq 0 ]; then
+    PORT="$(ask_port_value "请输入 Hysteria2 本机监听 UDP 端口" "$PORT")"
+  fi
+  validate_port "$PORT" "监听端口"
+
+  if [ "$CONNECT_PORT_SET" -eq 0 ]; then
+    CONNECT_PORT="$(ask_port_value "请输入原机器连接落地机的公网 UDP 端口" "$PORT")"
+  fi
+  validate_port "$CONNECT_PORT" "公网连接端口"
+}
+
+ensure_connect_port() {
+  detected_port="$1"
+  default_port="$detected_port"
+  [ -n "$default_port" ] || default_port="$PORT"
+
+  if [ "$CONNECT_PORT_SET" -eq 0 ]; then
+    CONNECT_PORT="$(ask_port_value "请输入原机器连接落地机的公网 UDP 端口" "$default_port")"
+  fi
+  validate_port "$CONNECT_PORT" "公网连接端口"
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -n|--name)
@@ -116,6 +181,17 @@ while [ "$#" -gt 0 ]; do
     -p|--port)
       [ "$#" -ge 2 ] || die "$1 需要参数值"
       PORT="$2"
+      PORT_SET=1
+      if [ "$CONNECT_PORT_SET" -eq 0 ]; then
+        CONNECT_PORT="$PORT"
+        CONNECT_PORT_SET=1
+      fi
+      shift 2
+      ;;
+    --connect-port|--public-port)
+      [ "$#" -ge 2 ] || die "$1 需要参数值"
+      CONNECT_PORT="$2"
+      CONNECT_PORT_SET=1
       shift 2
       ;;
     --server)
@@ -748,9 +824,10 @@ EOF
 
 ask_node_name
 
-case "$PORT" in
-  *[!0-9]*|'') die "无效端口: $PORT" ;;
-esac
+validate_port "$PORT" "监听端口"
+if [ -n "$CONNECT_PORT" ]; then
+  validate_port "$CONNECT_PORT" "公网连接端口"
+fi
 
 ensure_base_dependencies
 SERVER="$(detect_server)"
@@ -809,6 +886,7 @@ fi
 
 if [ "$HY2_EXISTS" -eq 0 ]; then
   if ask_yes_no "未检测到 hy2，现在安装独立 Hysteria2" "n"; then
+    ask_install_ports
     create_hysteria_config
     if detect_existing_hy2 "$DETECT_TMP"; then
       HY2_EXISTS=1
@@ -823,9 +901,11 @@ if [ "$HY2_EXISTS" -eq 0 ]; then
 fi
 
 if ask_yes_no "现在导出 QIE 导入数据" "y"; then
+  DETECTED_PORT="$(json_field "$DETECT_TMP" port)"
+  ensure_connect_port "$DETECTED_PORT"
   emit_export \
     "$(json_field "$DETECT_TMP" path)" \
-    "$(json_field "$DETECT_TMP" port)" \
+    "$CONNECT_PORT" \
     "$(json_field "$DETECT_TMP" password)" \
     "$(json_field "$DETECT_TMP" sni)" \
     "$EXPORT_TMP"
