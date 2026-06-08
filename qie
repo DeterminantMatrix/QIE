@@ -17,6 +17,7 @@ STATE = CDIR + '/qie_state'
 NODES_DIR = CDIR + '/qie_nodes'
 INDEX = CDIR + '/qie_nodes.json'
 CDIRECT = CDIR + '/sb_direct.json'
+VERSION = '2026.06.09-2'
 
 BEGIN = 'QIE_NODE_BEGIN'
 END = 'QIE_NODE_END'
@@ -824,6 +825,7 @@ def print_menu():
     cur = get_state()
 
     print('========================')
+    print(' QIE ' + VERSION)
     if cur == 'DIRECT':
         print(' 当前: 直连')
     elif cur and get_node(cur):
@@ -875,6 +877,7 @@ def print_menu():
 def usage():
     print('用法:')
     print('  qie')
+    print('  qie version')
     print('  qie add|import')
     print('  qie list')
     print('  qie rename <节点编号或名称> <新名称>')
@@ -886,6 +889,10 @@ def usage():
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1].strip().lower() in ('version', '-v', '--version'):
+        print('QIE ' + VERSION)
+        return
+
     if os.geteuid() != 0:
         die('错误: 请用 root 执行')
 
