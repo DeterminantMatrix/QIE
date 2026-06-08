@@ -9,6 +9,7 @@ PASSWORD=""
 SNI="qie.local"
 NO_START=0
 KEEP_DEPS=0
+YES=0
 
 usage() {
   cat <<'EOF'
@@ -24,10 +25,11 @@ Options:
   --sni NAME               TLS server name, default: qie.local
   --no-start               Write config and export data without restarting Hysteria2
   --keep-deps              Keep helper packages installed by this script
+  -y, --yes                Non-interactive: install missing hy2 and export
   -h, --help               Show this help
 
-Run this on the landing machine. It detects or installs Hysteria2, ensures a
-server config exists, then prints a QIE_NODE block to paste into qie.
+Run this on the landing machine. It prints detection results first, then asks
+whether to install Hysteria2, install BBR, and export a QIE_NODE block.
 EOF
 }
 
@@ -36,12 +38,46 @@ die() {
   exit 1
 }
 
-need_root() {
-  [ "$(id -u)" -eq 0 ] || die "root is required to install or configure Hysteria2"
+warn() {
+  echo "Warning: $*" >&2
 }
 
 have() {
   command -v "$1" >/dev/null 2>&1
+}
+
+need_root() {
+  [ "$(id -u)" -eq 0 ] || die "root is required for this action"
+}
+
+ask_yes_no() {
+  prompt="$1"
+  default="${2:-n}"
+  auto="${3:-1}"
+
+  if [ "$YES" -eq 1 ] && [ "$auto" -eq 1 ]; then
+    echo "$prompt: yes (auto)" >&2
+    return 0
+  fi
+
+  if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+    [ "$default" = "y" ]
+    return
+  fi
+
+  if [ "$default" = "y" ]; then
+    printf "%s [Y/n]: " "$prompt" >/dev/tty
+  else
+    printf "%s [y/N]: " "$prompt" >/dev/tty
+  fi
+
+  IFS= read -r answer </dev/tty || answer=""
+  case "$answer" in
+    y|Y|yes|YES) return 0 ;;
+    n|N|no|NO) return 1 ;;
+    '') [ "$default" = "y" ] ;;
+    *) return 1 ;;
+  esac
 }
 
 while [ "$#" -gt 0 ]; do
@@ -84,6 +120,10 @@ while [ "$#" -gt 0 ]; do
       KEEP_DEPS=1
       shift
       ;;
+    -y|--yes)
+      YES=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -104,20 +144,40 @@ detect_pm() {
   fi
 }
 
-install_base_packages() {
+install_packages() {
   pm="$(detect_pm)"
   case "$pm" in
     apk)
-      apk add --no-cache curl python3 openssl ca-certificates >/dev/null
+      apk add --no-cache "$@" >/dev/null
       ;;
     apt)
       apt-get update >/dev/null
-      DEBIAN_FRONTEND=noninteractive apt-get install -y curl python3 openssl ca-certificates >/dev/null
+      DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null
       ;;
     *)
-      die "unsupported package manager. Install curl, python3 and openssl manually."
+      die "unsupported package manager. Install required packages manually: $*"
       ;;
   esac
+}
+
+ensure_base_dependencies() {
+  HAD_CURL=0
+  HAD_PYTHON3=0
+  HAD_OPENSSL=0
+  have curl && HAD_CURL=1
+  have python3 && HAD_PYTHON3=1
+  have openssl && HAD_OPENSSL=1
+
+  missing=""
+  have curl || missing="$missing curl"
+  have python3 || missing="$missing python3"
+  have openssl || missing="$missing openssl"
+
+  if [ -n "$missing" ]; then
+    need_root
+    echo "Installing base dependencies:$missing" >&2
+    install_packages $missing ca-certificates
+  fi
 }
 
 remove_alpine_package_if_new() {
@@ -130,6 +190,17 @@ remove_alpine_package_if_new() {
 
   if have apk && apk info -e "$pkg" >/dev/null 2>&1; then
     apk del "$pkg" >/dev/null 2>&1 || true
+  fi
+}
+
+cleanup_after_export() {
+  rm -f /etc/s-box/certs/qie-hy2.crt /etc/s-box/certs/qie-hy2.key 2>/dev/null || true
+  rmdir /etc/s-box/certs /etc/s-box 2>/dev/null || true
+
+  if [ "$(detect_pm)" = "apk" ]; then
+    remove_alpine_package_if_new curl "$HAD_CURL"
+    remove_alpine_package_if_new python3 "$HAD_PYTHON3"
+    remove_alpine_package_if_new openssl "$HAD_OPENSSL"
   fi
 }
 
@@ -161,6 +232,7 @@ hysteria_bin() {
 }
 
 install_hysteria_binary() {
+  need_root
   arch="$(arch_name)"
   url="$(python3 - "$arch" <<'PY'
 import json
@@ -180,48 +252,9 @@ else:
     raise SystemExit(f'no Hysteria2 linux asset found for {arch}')
 PY
 )"
+  echo "Installing Hysteria2 binary..." >&2
   curl -fsSL "$url" -o /usr/local/bin/hysteria
   chmod 755 /usr/local/bin/hysteria
-}
-
-ensure_dependencies() {
-  HAD_CURL=0
-  HAD_PYTHON3=0
-  HAD_OPENSSL=0
-  have curl && HAD_CURL=1
-  have python3 && HAD_PYTHON3=1
-  have openssl && HAD_OPENSSL=1
-
-  missing=0
-  have curl || missing=1
-  have python3 || missing=1
-  have openssl || missing=1
-
-  if [ "$missing" -eq 1 ]; then
-    need_root
-    echo "Installing base packages..." >&2
-    install_base_packages
-  fi
-
-}
-
-ensure_hysteria() {
-  if ! hysteria_bin >/dev/null 2>&1; then
-    need_root
-    echo "Installing Hysteria2..." >&2
-    install_hysteria_binary
-  fi
-}
-
-cleanup_after_export() {
-  rm -f /etc/s-box/certs/qie-hy2.crt /etc/s-box/certs/qie-hy2.key 2>/dev/null || true
-  rmdir /etc/s-box/certs /etc/s-box 2>/dev/null || true
-
-  if [ "$(detect_pm)" = "apk" ]; then
-    remove_alpine_package_if_new curl "$HAD_CURL"
-    remove_alpine_package_if_new python3 "$HAD_PYTHON3"
-    remove_alpine_package_if_new openssl "$HAD_OPENSSL"
-  fi
 }
 
 detect_server() {
@@ -247,90 +280,30 @@ detect_server() {
   echo "$host"
 }
 
-detect_existing_config() {
-  if [ -f "$CONFIG" ]; then
-    echo "$CONFIG"
-    return
+singbox_exists() {
+  if have sing-box; then
+    return 0
   fi
-
-  for candidate in \
-    /etc/hysteria/config.yaml \
-    /etc/hysteria/config.yml \
-    /etc/hysteria/*.yaml \
-    /etc/hysteria/*.yml
-  do
-    if [ -f "$candidate" ]; then
-      echo "$candidate"
-      return
-    fi
+  for path in /etc/s-box/sb.json /etc/sing-box/config.json /usr/local/etc/sing-box/config.json /etc/s-box/*.json /etc/sing-box/*.json; do
+    [ -f "$path" ] && return 0
   done
-
-  echo "$CONFIG"
+  return 1
 }
 
-EXPORT_TMP=""
-
-try_export_existing() {
-  EXPORT_TMP="$(mktemp)"
-  python3 - "$SERVER" "$SNI" "$NAME" "$EXPORT_TMP" <<'PY'
-import base64
+detect_existing_hy2() {
+  out="$1"
+  python3 - "$out" <<'PY'
 import json
 import os
 import re
-import socket
 import sys
-import time
 
-server, sni, name, export_path = sys.argv[1:]
+out = sys.argv[1]
 
-def emit(config_path, port, password):
-    client_config = {
-        'log': {'level': 'info'},
-        'inbounds': [
-            {
-                'type': 'mixed',
-                'tag': 'mixed-in',
-                'listen': '127.0.0.1',
-                'listen_port': 2080,
-            }
-        ],
-        'outbounds': [
-            {
-                'type': 'hysteria2',
-                'tag': 'proxy',
-                'server': server,
-                'server_port': int(port),
-                'password': password,
-                'tls': {
-                    'enabled': True,
-                    'server_name': sni,
-                    'insecure': True,
-                },
-            },
-            {'type': 'direct', 'tag': 'direct'},
-        ],
-        'route': {'rules': [], 'final': 'proxy'},
-    }
-
-    payload = {
-        'format': 'qie-node',
-        'version': 1,
-        'name': name,
-        'source_host': socket.gethostname(),
-        'source_config': config_path,
-        'exported_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
-        'server': server,
-        'server_port': int(port),
-        'protocol': 'hysteria2',
-        'config': client_config,
-    }
-    raw = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-    encoded = base64.b64encode(raw).decode('ascii')
-    with open(export_path, 'w', encoding='utf-8', newline='\n') as f:
-        f.write('QIE_NODE_BEGIN\n')
-        for i in range(0, len(encoded), 76):
-            f.write(encoded[i:i + 76] + '\n')
-        f.write('QIE_NODE_END\n')
+def write(result):
+    with open(out, 'w', encoding='utf-8', newline='\n') as f:
+        json.dump(result, f, ensure_ascii=False)
+        f.write('\n')
 
 def read_text(path):
     with open(path, 'r', encoding='utf-8-sig') as f:
@@ -351,7 +324,7 @@ def parse_hysteria_config(path):
     m = re.search(r':(\d+)$', listen)
     if not m:
         return None
-    return int(m.group(1)), password
+    return {'kind': 'hysteria', 'path': path, 'port': int(m.group(1)), 'password': password}
 
 def split_host_port(server_value):
     if not isinstance(server_value, str):
@@ -380,7 +353,6 @@ def parse_singbox_config(path):
             continue
         if inbound.get('type') not in ('hysteria2', 'hy2'):
             continue
-
         port = inbound.get('listen_port')
         if port is None:
             _, port = split_host_port(inbound.get('listen'))
@@ -388,7 +360,6 @@ def parse_singbox_config(path):
             port = int(port)
         except Exception:
             port = None
-
         password = inbound.get('password')
         users = inbound.get('users')
         if not password and isinstance(users, list):
@@ -396,20 +367,15 @@ def parse_singbox_config(path):
                 if isinstance(user, dict) and user.get('password'):
                     password = user['password']
                     break
-
         if port and password:
-            return port, password
+            return {'kind': 'sing-box', 'path': path, 'port': port, 'password': password}
     return None
 
-hysteria_paths = [
-    '/etc/hysteria/config.yaml',
-    '/etc/hysteria/config.yml',
-]
-for base in ('/etc/hysteria',):
-    if os.path.isdir(base):
-        for name2 in sorted(os.listdir(base)):
-            if name2.endswith(('.yaml', '.yml')):
-                hysteria_paths.append(os.path.join(base, name2))
+hysteria_paths = ['/etc/hysteria/config.yaml', '/etc/hysteria/config.yml']
+if os.path.isdir('/etc/hysteria'):
+    for name in sorted(os.listdir('/etc/hysteria')):
+        if name.endswith(('.yaml', '.yml')):
+            hysteria_paths.append(os.path.join('/etc/hysteria', name))
 
 seen = set()
 for path in hysteria_paths:
@@ -418,21 +384,15 @@ for path in hysteria_paths:
     seen.add(path)
     parsed = parse_hysteria_config(path)
     if parsed:
-        port, password = parsed
-        print(f'Detected existing Hysteria2 config: {path}', file=sys.stderr)
-        emit(path, port, password)
+        write(parsed)
         raise SystemExit(0)
 
-singbox_paths = [
-    '/etc/s-box/sb.json',
-    '/etc/sing-box/config.json',
-    '/usr/local/etc/sing-box/config.json',
-]
+singbox_paths = ['/etc/s-box/sb.json', '/etc/sing-box/config.json', '/usr/local/etc/sing-box/config.json']
 for base in ('/etc/s-box', '/etc/sing-box'):
     if os.path.isdir(base):
-        for name2 in sorted(os.listdir(base)):
-            if name2.endswith('.json'):
-                singbox_paths.append(os.path.join(base, name2))
+        for name in sorted(os.listdir(base)):
+            if name.endswith('.json'):
+                singbox_paths.append(os.path.join(base, name))
 
 seen = set()
 for path in singbox_paths:
@@ -445,13 +405,130 @@ for path in singbox_paths:
         print(f'Skip unreadable sing-box config {path}: {e}', file=sys.stderr)
         continue
     if parsed:
-        port, password = parsed
-        print(f'Detected existing sing-box Hysteria2 inbound: {path}', file=sys.stderr)
-        emit(path, port, password)
+        write(parsed)
         raise SystemExit(0)
 
+write({'kind': '', 'path': '', 'port': '', 'password': ''})
 raise SystemExit(2)
 PY
+}
+
+json_field() {
+  file="$1"
+  key="$2"
+  python3 - "$file" "$key" <<'PY'
+import json
+import sys
+with open(sys.argv[1], 'r', encoding='utf-8-sig') as f:
+    data = json.load(f)
+value = data.get(sys.argv[2], '')
+print(value)
+PY
+}
+
+bbr_current() {
+  sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null \
+    || cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null \
+    || echo unknown
+}
+
+bbr_available() {
+  sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null \
+    || cat /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null \
+    || echo unknown
+}
+
+install_bbr() {
+  need_root
+  if ! have bash; then
+    echo "Installing bash for BBR helper..." >&2
+    install_packages bash
+  fi
+  have curl || install_packages curl
+
+  echo "Running BBR helper..." >&2
+  if [ -r /dev/tty ]; then
+    bash -c 'set -e; bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/install-alias.sh?$(date +%s)"); [ -f ~/.bashrc ] && source ~/.bashrc || true; command -v bbr >/dev/null 2>&1 && bbr || { echo "bbr command not found after install" >&2; exit 1; }' </dev/tty
+  else
+    bash -c 'set -e; bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/install-alias.sh?$(date +%s)"); [ -f ~/.bashrc ] && source ~/.bashrc || true; command -v bbr >/dev/null 2>&1 && bbr || { echo "bbr command not found after install" >&2; exit 1; }'
+  fi
+}
+
+emit_export() {
+  source_path="$1"
+  port="$2"
+  password="$3"
+  out="$4"
+  python3 - "$SERVER" "$SNI" "$NAME" "$source_path" "$port" "$password" "$out" <<'PY'
+import base64
+import json
+import socket
+import sys
+import time
+
+server, sni, name, source_path, port, password, out = sys.argv[1:]
+port = int(port)
+client_config = {
+    'log': {'level': 'info'},
+    'inbounds': [
+        {
+            'type': 'mixed',
+            'tag': 'mixed-in',
+            'listen': '127.0.0.1',
+            'listen_port': 2080,
+        }
+    ],
+    'outbounds': [
+        {
+            'type': 'hysteria2',
+            'tag': 'proxy',
+            'server': server,
+            'server_port': port,
+            'password': password,
+            'tls': {
+                'enabled': True,
+                'server_name': sni,
+                'insecure': True,
+            },
+        },
+        {'type': 'direct', 'tag': 'direct'},
+    ],
+    'route': {'rules': [], 'final': 'proxy'},
+}
+payload = {
+    'format': 'qie-node',
+    'version': 1,
+    'name': name,
+    'source_host': socket.gethostname(),
+    'source_config': source_path,
+    'exported_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
+    'server': server,
+    'server_port': port,
+    'protocol': 'hysteria2',
+    'config': client_config,
+}
+raw = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+encoded = base64.b64encode(raw).decode('ascii')
+with open(out, 'w', encoding='utf-8', newline='\n') as f:
+    f.write('QIE_NODE_BEGIN\n')
+    for i in range(0, len(encoded), 76):
+        f.write(encoded[i:i + 76] + '\n')
+    f.write('QIE_NODE_END\n')
+PY
+}
+
+detect_existing_config() {
+  if [ -f "$CONFIG" ]; then
+    echo "$CONFIG"
+    return
+  fi
+  for candidate in /etc/hysteria/config.yaml /etc/hysteria/config.yml /etc/hysteria/*.yaml /etc/hysteria/*.yml; do
+    [ -f "$candidate" ] && {
+      echo "$candidate"
+      return
+    }
+  done
+  echo "$CONFIG"
 }
 
 ensure_service() {
@@ -516,6 +593,60 @@ EOF
   die "cannot restart Hysteria2: no systemctl, rc-service or service found"
 }
 
+create_hysteria_config() {
+  ensure_hysteria_missing=0
+  if ! hysteria_bin >/dev/null 2>&1; then
+    install_hysteria_binary
+    ensure_hysteria_missing=1
+  fi
+  HYSTERIA="$(hysteria_bin)"
+  CONFIG="$(detect_existing_config)"
+
+  need_root
+  mkdir -p "$(dirname "$CONFIG")" /etc/hysteria/certs
+
+  cert="/etc/hysteria/certs/qie-hy2.crt"
+  key="/etc/hysteria/certs/qie-hy2.key"
+
+  if [ ! -f "$cert" ] || [ ! -f "$key" ]; then
+    echo "Generating self-signed TLS certificate..." >&2
+    openssl req -x509 -newkey rsa:2048 -keyout "$key" -out "$cert" -days 3650 -nodes -subj "/CN=$SNI" >/dev/null 2>&1
+    chmod 600 "$key"
+  fi
+
+  if [ -z "$PASSWORD" ]; then
+    PASSWORD="$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(24))
+PY
+)"
+  fi
+
+  if [ ! -s "$CONFIG" ]; then
+    cat >"$CONFIG" <<EOF
+listen: :$PORT
+
+tls:
+  cert: $cert
+  key: $key
+
+auth:
+  type: password
+  password: $PASSWORD
+
+masquerade:
+  type: proxy
+  proxy:
+    url: https://www.bing.com/
+    rewriteHost: true
+EOF
+  fi
+
+  ensure_service "$CONFIG" "$HYSTERIA"
+  DETECT_TMP="$(mktemp)"
+  detect_existing_hy2 "$DETECT_TMP" || true
+}
+
 if [ -z "$NAME" ]; then
   NAME="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo node)"
 fi
@@ -524,171 +655,79 @@ case "$PORT" in
   *[!0-9]*|'') die "invalid port: $PORT" ;;
 esac
 
-ensure_dependencies
+ensure_base_dependencies
 SERVER="$(detect_server)"
 
-if try_export_existing; then
-  cat "$EXPORT_TMP"
-  rm -f "$EXPORT_TMP"
+DETECT_TMP="$(mktemp)"
+EXPORT_TMP="$(mktemp)"
+trap 'rm -f "$DETECT_TMP" "$EXPORT_TMP"' EXIT HUP INT TERM
+
+if detect_existing_hy2 "$DETECT_TMP"; then
+  HY2_EXISTS=1
+else
+  HY2_EXISTS=0
+fi
+
+if singbox_exists; then
+  SINGBOX_EXISTS=1
+else
+  SINGBOX_EXISTS=0
+fi
+
+BBR_CURRENT="$(bbr_current)"
+BBR_AVAILABLE="$(bbr_available)"
+
+echo "========================"
+echo " QIE landing detection"
+echo "========================"
+if [ "$HY2_EXISTS" -eq 1 ]; then
+  echo "hy2: yes ($(json_field "$DETECT_TMP" kind), $(json_field "$DETECT_TMP" path), port $(json_field "$DETECT_TMP" port))"
+else
+  echo "hy2: no"
+fi
+if [ "$SINGBOX_EXISTS" -eq 1 ]; then
+  echo "sing-box: yes"
+else
+  echo "sing-box: no"
+fi
+echo "bbr: current=$BBR_CURRENT available=$BBR_AVAILABLE"
+echo "server: $SERVER"
+echo "========================"
+
+if [ "$BBR_CURRENT" != "bbr" ]; then
+  if ask_yes_no "Install/enable BBR now" "n" 0; then
+    if ! install_bbr; then
+      warn "BBR helper failed or was blocked by the container/host. Continuing."
+    fi
+    BBR_CURRENT="$(bbr_current)"
+    echo "bbr after action: current=$BBR_CURRENT"
+  fi
+fi
+
+if [ "$HY2_EXISTS" -eq 0 ]; then
+  if ask_yes_no "No hy2 found. Install standalone Hysteria2 now" "n"; then
+    create_hysteria_config
+    if detect_existing_hy2 "$DETECT_TMP"; then
+      HY2_EXISTS=1
+    fi
+  fi
+fi
+
+if [ "$HY2_EXISTS" -eq 0 ]; then
+  warn "No hy2 is available. Nothing to export."
   cleanup_after_export
   exit 0
 fi
 
-rm -f "$EXPORT_TMP"
-
-ensure_hysteria
-CONFIG="$(detect_existing_config)"
-HYSTERIA="$(hysteria_bin)"
-
-need_root
-mkdir -p "$(dirname "$CONFIG")" /etc/hysteria/certs
-
-CERT="/etc/hysteria/certs/qie-hy2.crt"
-KEY="/etc/hysteria/certs/qie-hy2.key"
-
-if [ ! -f "$CERT" ] || [ ! -f "$KEY" ]; then
-  echo "Generating self-signed TLS certificate..." >&2
-  openssl req -x509 -newkey rsa:2048 -keyout "$KEY" -out "$CERT" -days 3650 -nodes -subj "/CN=$SNI" >/dev/null 2>&1
-  chmod 600 "$KEY"
+if ask_yes_no "Export QIE import data now" "y"; then
+  emit_export \
+    "$(json_field "$DETECT_TMP" path)" \
+    "$(json_field "$DETECT_TMP" port)" \
+    "$(json_field "$DETECT_TMP" password)" \
+    "$EXPORT_TMP"
+  cat "$EXPORT_TMP"
+else
+  echo "Export skipped."
 fi
 
-if [ -z "$PASSWORD" ]; then
-  PASSWORD="$(python3 - <<'PY'
-import secrets
-print(secrets.token_urlsafe(24))
-PY
-)"
-fi
-
-echo "Ensuring Hysteria2 server config in: $CONFIG" >&2
-
-trap 'rm -f "$EXPORT_TMP"' EXIT HUP INT TERM
-EXPORT_TMP="$(mktemp)"
-
-python3 - "$CONFIG" "$PORT" "$PASSWORD" "$CERT" "$KEY" "$SERVER" "$SNI" "$NAME" "$EXPORT_TMP" <<'PY'
-import base64
-import json
-import os
-import re
-import shutil
-import socket
-import sys
-import time
-
-config_path, port, password, cert, key, server, sni, name, export_path = sys.argv[1:]
-port = int(port)
-
-def read_text(path):
-    if not os.path.exists(path):
-        return ''
-    with open(path, 'r', encoding='utf-8-sig') as f:
-        return f.read()
-
-def write_text(path, text):
-    if os.path.exists(path):
-        backup = path + '.qie.bak'
-        shutil.copy2(path, backup)
-        print(f'Backup: {backup}', file=sys.stderr)
-    tmp = path + '.tmp'
-    with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
-        f.write(text)
-    os.replace(tmp, path)
-
-def find_scalar(text, key_name):
-    m = re.search(rf'(?m)^\s*{re.escape(key_name)}\s*:\s*["\']?([^"\'\n#]+)', text)
-    return m.group(1).strip() if m else None
-
-existing = read_text(config_path)
-
-if existing.strip():
-    listen = find_scalar(existing, 'listen')
-    auth = find_scalar(existing, 'password')
-    if auth:
-        password = auth
-    if listen:
-        m = re.search(r':(\d+)$', listen)
-        if m:
-            port = int(m.group(1))
-    print('Detected existing Hysteria2 config.', file=sys.stderr)
-else:
-    text = f'''listen: :{port}
-
-tls:
-  cert: {cert}
-  key: {key}
-
-auth:
-  type: password
-  password: {password}
-
-masquerade:
-  type: proxy
-  proxy:
-    url: https://www.bing.com/
-    rewriteHost: true
-'''
-    write_text(config_path, text)
-    print('Created Hysteria2 config.', file=sys.stderr)
-
-client_config = {
-    'log': {
-        'level': 'info',
-    },
-    'inbounds': [
-        {
-            'type': 'mixed',
-            'tag': 'mixed-in',
-            'listen': '127.0.0.1',
-            'listen_port': 2080,
-        }
-    ],
-    'outbounds': [
-        {
-            'type': 'hysteria2',
-            'tag': 'proxy',
-            'server': server,
-            'server_port': port,
-            'password': password,
-            'tls': {
-                'enabled': True,
-                'server_name': sni,
-                'insecure': True,
-            },
-        },
-        {
-            'type': 'direct',
-            'tag': 'direct',
-        },
-    ],
-    'route': {
-        'rules': [],
-        'final': 'proxy',
-    },
-}
-
-payload = {
-    'format': 'qie-node',
-    'version': 1,
-    'name': name,
-    'source_host': socket.gethostname(),
-    'source_config': config_path,
-    'exported_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
-    'server': server,
-    'server_port': port,
-    'protocol': 'hysteria2',
-    'config': client_config,
-}
-
-raw = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-encoded = base64.b64encode(raw).decode('ascii')
-
-with open(export_path, 'w', encoding='utf-8', newline='\n') as f:
-    f.write('QIE_NODE_BEGIN\n')
-    for i in range(0, len(encoded), 76):
-        f.write(encoded[i:i + 76] + '\n')
-    f.write('QIE_NODE_END\n')
-PY
-
-ensure_service "$CONFIG" "$HYSTERIA"
-cat "$EXPORT_TMP"
 cleanup_after_export
