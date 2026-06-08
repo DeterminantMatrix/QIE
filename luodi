@@ -526,6 +526,7 @@ payload = {
     'server': server,
     'server_port': port,
     'protocol': 'hysteria2',
+    'test_protocol': 'udp',
     'config': client_config,
 }
 raw = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')

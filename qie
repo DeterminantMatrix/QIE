@@ -17,7 +17,7 @@ STATE = CDIR + '/qie_state'
 NODES_DIR = CDIR + '/qie_nodes'
 INDEX = CDIR + '/qie_nodes.json'
 CDIRECT = CDIR + '/sb_direct.json'
-VERSION = '2026.06.09-3'
+VERSION = '2026.06.09-4'
 QIE_OUT_TAG = 'qie-proxy'
 QIE_DIRECT_TAG = 'direct'
 
@@ -333,6 +333,10 @@ def endpoint_text(endpoint):
     return f"{endpoint['host']}:{endpoint['port']} [{suffix}]"
 
 
+def test_protocol_text(node, endpoint=None):
+    return '测速=' + node_test_protocol(node, endpoint).upper()
+
+
 def node_label(node):
     ep = node.get('endpoint') or detect_endpoint_from_config(node['config'])
     if ep:
@@ -376,11 +380,75 @@ def fmt_latency(v):
     return f'TCP: {v:.0f}ms'
 
 
+def udp_latency(host, port, timeout=2.0, samples=3):
+    times = []
+
+    for _ in range(samples):
+        family = socket.AF_INET6 if ':' in host else socket.AF_INET
+        s = socket.socket(family, socket.SOCK_DGRAM)
+        s.settimeout(timeout)
+        start = time.monotonic()
+
+        try:
+            s.connect((host, port))
+            s.send(b'\x00')
+            cost = (time.monotonic() - start) * 1000
+            times.append(cost)
+        except OSError:
+            pass
+        finally:
+            s.close()
+
+    if not times:
+        return None
+
+    return sum(times) / len(times)
+
+
+def fmt_latency_by_protocol(v, protocol):
+    if protocol == 'udp':
+        if v is None:
+            return 'UDP: 不可确认'
+        return f'UDP: 已发送 {v:.0f}ms'
+
+    prefix = 'TCP'
+    if v is None:
+        return prefix + ': 超时'
+    return f'{prefix}: {v:.0f}ms'
+
+
+def infer_test_protocol(endpoint):
+    if not endpoint:
+        return 'tcp'
+
+    typ = endpoint.get('type')
+    if typ in ('hysteria', 'hysteria2', 'hy2', 'tuic'):
+        return 'udp'
+
+    return 'tcp'
+
+
+def node_test_protocol(node, endpoint=None):
+    value = str(node.get('test_protocol') or '').strip().lower()
+    if value in ('tcp', 'udp'):
+        return value
+
+    return infer_test_protocol(endpoint or node.get('endpoint') or detect_endpoint_from_config(node['config']))
+
+
+def measure_latency(host, port, protocol, timeout=2.0, samples=3):
+    if protocol == 'udp':
+        return udp_latency(host, port, timeout=timeout, samples=samples)
+    return tcp_latency(host, port, timeout=timeout, samples=samples)
+
+
 def node_latency_text(node, timeout=1.0, samples=1):
     ep = node.get('endpoint') or detect_endpoint_from_config(node['config'])
     if not ep:
         return '延迟: 未识别'
-    return fmt_latency(tcp_latency(ep['host'], ep['port'], timeout=timeout, samples=samples))
+    protocol = node_test_protocol(node, ep)
+    latency = measure_latency(ep['host'], ep['port'], protocol, timeout=timeout, samples=samples)
+    return fmt_latency_by_protocol(latency, protocol)
 
 
 def has_direct_outbound(data):
@@ -734,7 +802,12 @@ def decode_import_payload(encoded):
     if not name:
         name = 'node'
 
-    return name, config
+    test_protocol = str(data.get('test_protocol') or '').strip().lower()
+    if test_protocol not in ('tcp', 'udp'):
+        endpoint = detect_endpoint_from_data(config)
+        test_protocol = infer_test_protocol(endpoint)
+
+    return name, config, test_protocol
 
 
 def unique_node_id(base, nodes):
@@ -752,7 +825,7 @@ def unique_node_id(base, nodes):
 def import_node():
     cleanup_qie_residue()
     encoded = read_import_block()
-    name, config = decode_import_payload(encoded)
+    name, config, test_protocol = decode_import_payload(encoded)
 
     nodes = load_index()
     node_id = unique_node_id(name, nodes)
@@ -770,6 +843,7 @@ def import_node():
         'name': name,
         'config': config_path,
         'endpoint': endpoint,
+        'test_protocol': test_protocol,
         'created_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
     }
     nodes.append(node)
@@ -799,7 +873,7 @@ def print_nodes():
     for i, node in enumerate(nodes, 1):
         mark = '*' if cur == node['id'] else ' '
         ep = node.get('endpoint') or detect_endpoint_from_config(node['config'])
-        print(f"{mark} {i}. {node['id']}  {node_label(node)}  {endpoint_text(ep)}  {node_latency_text(node)}")
+        print(f"{mark} {i}. {node['id']}  {node_label(node)}  {endpoint_text(ep)}  {test_protocol_text(node, ep)}  {node_latency_text(node)}")
 
 
 def rename_node(key=None, new_name=None):
@@ -912,15 +986,16 @@ def print_test():
         return
 
     print('========================')
-    print(' 节点 TCP 测速')
+    print(' 节点延迟测速')
     print('========================')
 
     for node in nodes:
         ep = node.get('endpoint') or detect_endpoint_from_config(node['config'])
         latency = None
+        protocol = node_test_protocol(node, ep)
         if ep:
-            latency = tcp_latency(ep['host'], ep['port'])
-        print(f" {node['id']:<18} {endpoint_text(ep):<36} {fmt_latency(latency)}")
+            latency = measure_latency(ep['host'], ep['port'], protocol)
+        print(f" {node['id']:<18} {endpoint_text(ep):<36} {fmt_latency_by_protocol(latency, protocol)}")
 
 
 def print_status():
@@ -967,7 +1042,8 @@ def print_menu():
     print('========================')
 
     for i, node in enumerate(nodes, 1):
-        print(f" {i}. {node_label(node)}  {node_latency_text(node)}")
+        ep = node.get('endpoint') or detect_endpoint_from_config(node['config'])
+        print(f" {i}. {node_label(node)}  {test_protocol_text(node, ep)}  {node_latency_text(node)}")
 
     print(' a. 录入落地机')
     print(' r. 重命名落地机')

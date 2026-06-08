@@ -7,7 +7,7 @@
 1. 在落地机 SSH 中执行导出命令，生成 `QIE_NODE_BEGIN` / `QIE_NODE_END` 数据块。
 2. 回到原机器运行 `sudo qie` 或 `sudo qie add`。
 3. 粘贴落地机生成的数据块。
-4. `qie` 自动保存该落地机出口配置，之后可以在菜单中切换并查看延迟。
+4. `qie` 自动保存该落地机出口配置和测速协议，之后可以在菜单中切换并查看延迟。
 
 ## 安装 qie
 
@@ -108,6 +108,8 @@ QIE_NODE_BEGIN
 ...
 QIE_NODE_END
 ```
+
+导出数据会写入 `test_protocol`。Hysteria2 / TUIC 这类 UDP 协议会按 UDP 测速，避免在 `qie` 菜单中被错误显示为 TCP 超时。
 
 复制整段输出，回到原机器执行：
 
