@@ -410,19 +410,19 @@ def ensure_direct_config():
         return
 
     if not os.path.exists(CRUN):
-        die('错误: 当前没有运行配置，无法生成 Direct 配置')
+        die('错误: 当前没有运行配置，无法生成直连配置')
 
     if not validate_json(CRUN):
-        die('错误: 当前运行配置 JSON 不合法，无法生成 Direct 配置')
+        die('错误: 当前运行配置 JSON 不合法，无法生成直连配置')
 
     data = make_direct(load_json(CRUN))
     save_json(CDIRECT, data)
 
     if not validate_config(CDIRECT):
         os.remove(CDIRECT)
-        die('错误: 自动创建的 Direct 配置不合法，已删除')
+        die('错误: 自动创建的直连配置不合法，已删除')
 
-    print('已创建 Direct 配置: ' + CDIRECT)
+    print('已创建直连配置: ' + CDIRECT)
 
 
 def restart_sb():
@@ -547,7 +547,7 @@ def switch_node(node):
 
 def switch_direct():
     ensure_direct_config()
-    switch_to_path('DIRECT', 'Direct', CDIRECT)
+    switch_to_path('DIRECT', '直连', CDIRECT)
 
 
 def read_import_block():
@@ -697,7 +697,7 @@ def print_status():
     print('========================')
 
     if cur == 'DIRECT':
-        print('当前模式: Direct')
+        print('当前模式: 直连')
     elif cur:
         node = get_node(cur)
         print('当前模式: ' + node_label(node))
@@ -708,9 +708,9 @@ def print_status():
 
     sb = find_singbox()
     if sb:
-        print('sing-box bin: ' + sb)
+        print('sing-box 路径: ' + sb)
     else:
-        print('sing-box bin: 未找到')
+        print('sing-box 路径: 未找到')
 
     print('节点数量: ' + str(len(load_index())))
 
@@ -722,7 +722,7 @@ def print_menu():
 
     print('========================')
     if cur == 'DIRECT':
-        print(' 当前: Direct')
+        print(' 当前: 直连')
     elif cur and get_node(cur):
         print(' 当前: ' + node_label(get_node(cur)))
     else:
@@ -734,10 +734,10 @@ def print_menu():
         print(f" {i}. {node_label(node)}")
 
     print(' a. 录入落地机')
-    print(' d. Direct')
-    print(' s. Status')
-    print(' t. Test')
-    print(' 0. Exit')
+    print(' d. 直连')
+    print(' s. 状态')
+    print(' t. 测速')
+    print(' 0. 退出')
     print('========================')
 
     try:
@@ -760,7 +760,7 @@ def print_menu():
     elif ch in ('t', 'test'):
         print_test()
     else:
-        print('Bye.')
+        print('已退出。')
 
 
 def usage():
