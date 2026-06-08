@@ -17,7 +17,9 @@ STATE = CDIR + '/qie_state'
 NODES_DIR = CDIR + '/qie_nodes'
 INDEX = CDIR + '/qie_nodes.json'
 CDIRECT = CDIR + '/sb_direct.json'
-VERSION = '2026.06.09-2'
+VERSION = '2026.06.09-3'
+QIE_OUT_TAG = 'qie-proxy'
+QIE_DIRECT_TAG = 'direct'
 
 BEGIN = 'QIE_NODE_BEGIN'
 END = 'QIE_NODE_END'
@@ -374,6 +376,13 @@ def fmt_latency(v):
     return f'TCP: {v:.0f}ms'
 
 
+def node_latency_text(node, timeout=1.0, samples=1):
+    ep = node.get('endpoint') or detect_endpoint_from_config(node['config'])
+    if not ep:
+        return '延迟: 未识别'
+    return fmt_latency(tcp_latency(ep['host'], ep['port'], timeout=timeout, samples=samples))
+
+
 def has_direct_outbound(data):
     outs = data.get('outbounds', [])
     if not isinstance(outs, list):
@@ -401,6 +410,84 @@ def make_direct(data):
     data['route']['rules'] = []
     data['route']['final'] = 'direct'
 
+    return data
+
+
+def outbound_from_node_config(path):
+    data = load_json(path)
+    outs = data.get('outbounds', [])
+    if not isinstance(outs, list):
+        die('错误: 节点配置缺少 outbounds')
+
+    by_tag = {
+        o.get('tag'): o
+        for o in outs
+        if isinstance(o, dict) and isinstance(o.get('tag'), str)
+    }
+
+    route = data.get('route', {})
+    if isinstance(route, dict):
+        final = route.get('final')
+        if isinstance(final, str) and final in by_tag:
+            outbound = by_tag[final]
+            if endpoint_from_outbound(outbound):
+                return dict(outbound)
+
+    for outbound in outs:
+        if endpoint_from_outbound(outbound):
+            return dict(outbound)
+
+    die('错误: 节点配置中未找到可用的远程出口')
+
+
+def remove_qie_outbounds(data):
+    outs = data.get('outbounds', [])
+    if not isinstance(outs, list):
+        data['outbounds'] = []
+        return
+
+    data['outbounds'] = [
+        o for o in outs
+        if not (isinstance(o, dict) and o.get('tag') == QIE_OUT_TAG)
+    ]
+
+
+def ensure_direct_outbound(data):
+    outs = data.get('outbounds')
+    if not isinstance(outs, list):
+        outs = []
+        data['outbounds'] = outs
+
+    for outbound in outs:
+        if isinstance(outbound, dict) and outbound.get('tag') == QIE_DIRECT_TAG:
+            return
+
+    outs.append({'type': 'direct', 'tag': QIE_DIRECT_TAG})
+
+
+def build_runtime_config(state, node=None):
+    if not os.path.exists(CRUN):
+        die('错误: 当前没有运行配置，无法切换')
+
+    if not validate_json(CRUN):
+        die('错误: 当前运行配置 JSON 不合法，放弃切换')
+
+    data = load_json(CRUN)
+    remove_qie_outbounds(data)
+    ensure_direct_outbound(data)
+
+    if state == 'DIRECT':
+        final = QIE_DIRECT_TAG
+    else:
+        outbound = outbound_from_node_config(node['config'])
+        outbound['tag'] = QIE_OUT_TAG
+        data['outbounds'].append(outbound)
+        final = QIE_OUT_TAG
+
+    if 'route' not in data or not isinstance(data['route'], dict):
+        data['route'] = {}
+
+    data['route']['final'] = final
     return data
 
 
@@ -542,13 +629,55 @@ def switch_to_path(state, label, src):
     sys.exit(1)
 
 
+def switch_runtime(state, label, node=None):
+    rollback = None
+    if os.path.exists(CRUN):
+        rollback = CRUN + '.rollback'
+        shutil.copy2(CRUN, rollback)
+
+    data = build_runtime_config(state, node)
+    tmp = CRUN + '.tmp'
+    save_json(tmp, data)
+    if not validate_config(tmp):
+        try:
+            os.remove(tmp)
+        except FileNotFoundError:
+            pass
+        die('错误: 合并后的运行配置不合法，放弃切换')
+
+    print('切换至 ' + label + ' ...', end=' ', flush=True)
+    os.replace(tmp, CRUN)
+
+    if restart_sb():
+        save_state(state)
+        print('OK')
+        if rollback and os.path.exists(rollback):
+            os.remove(rollback)
+        cleanup_qie_residue()
+        return
+
+    print('失败，回滚中...')
+    if rollback and os.path.exists(rollback):
+        atomic_copy(rollback, CRUN)
+        os.remove(rollback)
+        if restart_sb():
+            print('已回滚到原配置')
+        else:
+            print('严重错误: 回滚后 sing-box 仍未启动')
+            print('建议检查 sing-box 服务状态')
+    else:
+        print('没有可回滚的原配置，请手动检查 ' + CRUN)
+
+    cleanup_qie_residue()
+    sys.exit(1)
+
+
 def switch_node(node):
-    switch_to_path(node['id'], node_label(node), node['config'])
+    switch_runtime(node['id'], node_label(node), node)
 
 
 def switch_direct():
-    ensure_direct_config()
-    switch_to_path('DIRECT', '直连', CDIRECT)
+    switch_runtime('DIRECT', '直连')
 
 
 def read_import_block():
@@ -670,7 +799,7 @@ def print_nodes():
     for i, node in enumerate(nodes, 1):
         mark = '*' if cur == node['id'] else ' '
         ep = node.get('endpoint') or detect_endpoint_from_config(node['config'])
-        print(f"{mark} {i}. {node['id']}  {node_label(node)}  {endpoint_text(ep)}")
+        print(f"{mark} {i}. {node['id']}  {node_label(node)}  {endpoint_text(ep)}  {node_latency_text(node)}")
 
 
 def rename_node(key=None, new_name=None):
@@ -805,6 +934,8 @@ def print_status():
     elif cur:
         node = get_node(cur)
         print('当前模式: ' + node_label(node))
+        if node:
+            print('当前延迟: ' + node_latency_text(node))
     else:
         print('当前模式: 未设置')
 
@@ -836,7 +967,7 @@ def print_menu():
     print('========================')
 
     for i, node in enumerate(nodes, 1):
-        print(f" {i}. {node_label(node)}")
+        print(f" {i}. {node_label(node)}  {node_latency_text(node)}")
 
     print(' a. 录入落地机')
     print(' r. 重命名落地机')

@@ -1,13 +1,13 @@
 # QIE
 
-`qie` 是一个用于管理和切换落地机配置的命令行脚本。原机器使用 sing-box，落地机使用 Hysteria2 服务端承接流量。
+`qie` 是一个用于管理和切换落地机出口的命令行脚本。原机器运行 sing-box 服务端入站，落地机使用 Hysteria2 承接出口流量。
 
 它不主动 SSH 到落地机。正确流程是：
 
 1. 在落地机 SSH 中执行导出命令，生成 `QIE_NODE_BEGIN` / `QIE_NODE_END` 数据块。
 2. 回到原机器运行 `sudo qie` 或 `sudo qie add`。
 3. 粘贴落地机生成的数据块。
-4. `qie` 自动保存该落地机配置，之后可以在菜单中切换。
+4. `qie` 自动保存该落地机出口配置，之后可以在菜单中切换并查看延迟。
 
 ## 安装 qie
 
@@ -177,9 +177,11 @@ curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$
 | `/etc/s-box/qie_nodes/` | 导入的落地机配置 |
 | `/etc/s-box/qie_nodes.json` | 节点索引 |
 | `/etc/s-box/qie_state` | 当前模式状态 |
-| `/etc/s-box/sb_direct.json` | Direct 配置 |
+| `/etc/s-box/sb_direct.json` | 旧版 Direct 配置，保留兼容 |
 
-切换节点时，`qie` 会把目标配置复制到 `/etc/s-box/sb.json`，然后重启 `sing-box`。如果重启失败，会尝试回滚到原配置。
+切换节点时，`qie` 不会把落地机客户端配置整体覆盖到 `/etc/s-box/sb.json`。它会读取当前运行配置，保留原有 `inbounds`、已有 `outbounds` 和 `route.rules`，只替换由 `qie` 管理的 `qie-proxy` 出口，并把 `route.final` 指向当前落地机。切回 Direct 时只把 `route.final` 改回 `direct`。
+
+如果重启 `sing-box` 失败，`qie` 会尝试回滚到切换前的配置。
 
 ## 用法
 
