@@ -109,7 +109,7 @@ QIE_NODE_BEGIN
 QIE_NODE_END
 ```
 
-导出数据会写入 `test_protocol`。Hysteria2 / TUIC 这类 UDP 协议会按 UDP 测速，避免在 `qie` 菜单中被错误显示为 TCP 超时。
+导出数据会写入 `test_protocol`。Hysteria2 / TUIC 这类 UDP 协议会按 UDP 节点处理，避免在 `qie` 菜单中被错误显示为 TCP 超时。
 
 复制整段输出，回到原机器执行：
 
@@ -249,6 +249,12 @@ sudo qie status
 ```bash
 sudo qie test
 ```
+
+延迟显示说明：
+
+- `sudo qie` 和 `sudo qie list` 中，HY2 / TUIC 节点显示的是 ICMP 延迟，即本机到落地机 IP 的基础网络延迟。
+- `sudo qie test` 会额外启动一个临时 sing-box 客户端，通过该落地机访问 `https://www.gstatic.com/generate_204`，显示 `出站`耗时。该测试不修改 `/etc/s-box/sb.json`，结束后会关闭临时进程。
+- 如果落地机禁 ping，会显示 `ICMP: 不可用`，但 `出站`测试仍可用于判断 HY2 链路是否可用。
 
 ## 更新
 
