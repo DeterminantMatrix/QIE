@@ -17,7 +17,7 @@ STATE = CDIR + '/qie_state'
 NODES_DIR = CDIR + '/qie_nodes'
 INDEX = CDIR + '/qie_nodes.json'
 CDIRECT = CDIR + '/sb_direct.json'
-VERSION = '2026.06.09-4'
+VERSION = '2026.06.09-5'
 QIE_OUT_TAG = 'qie-proxy'
 QIE_DIRECT_TAG = 'direct'
 
@@ -421,7 +421,7 @@ def infer_test_protocol(endpoint):
     if not endpoint:
         return 'tcp'
 
-    typ = endpoint.get('type')
+    typ = str(endpoint.get('type') or '').strip().lower()
     if typ in ('hysteria', 'hysteria2', 'hy2', 'tuic'):
         return 'udp'
 
@@ -429,11 +429,19 @@ def infer_test_protocol(endpoint):
 
 
 def node_test_protocol(node, endpoint=None):
+    ep = endpoint or node.get('endpoint')
+    if infer_test_protocol(ep) == 'udp':
+        return 'udp'
+
+    config_ep = detect_endpoint_from_config(node['config'])
+    if infer_test_protocol(config_ep) == 'udp':
+        return 'udp'
+
     value = str(node.get('test_protocol') or '').strip().lower()
     if value in ('tcp', 'udp'):
         return value
 
-    return infer_test_protocol(endpoint or node.get('endpoint') or detect_endpoint_from_config(node['config']))
+    return infer_test_protocol(ep or config_ep)
 
 
 def measure_latency(host, port, protocol, timeout=2.0, samples=3):
