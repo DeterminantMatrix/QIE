@@ -55,6 +55,27 @@ def save_json(path, data):
     os.replace(tmp, path)
 
 
+def cleanup_qie_residue():
+    targets = []
+    for root in (CDIR, NODES_DIR):
+        if not os.path.isdir(root):
+            continue
+        for name in os.listdir(root):
+            if (
+                name.endswith('.tmp')
+                or name.endswith('.rollback')
+                or name.endswith('.qie.bak')
+            ):
+                targets.append(os.path.join(root, name))
+
+    for path in targets:
+        try:
+            if os.path.isfile(path) or os.path.islink(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+
 def atomic_copy(src, dst):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     tmp = dst + '.tmp'
@@ -599,6 +620,7 @@ def unique_node_id(base, nodes):
 
 
 def import_node():
+    cleanup_qie_residue()
     encoded = read_import_block()
     name, config = decode_import_payload(encoded)
 
@@ -609,6 +631,7 @@ def import_node():
     save_json(config_path, config)
     if not validate_config(config_path):
         os.remove(config_path)
+        cleanup_qie_residue()
         die('错误: 导入配置未通过校验，已放弃')
 
     endpoint = detect_endpoint_from_data(config)
@@ -624,6 +647,7 @@ def import_node():
 
     print('已导入落地机: ' + node_label(node))
     print('配置文件: ' + config_path)
+    cleanup_qie_residue()
 
 
 def ensure_has_nodes_or_import():

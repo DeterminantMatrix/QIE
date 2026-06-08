@@ -2,13 +2,13 @@
 set -eu
 
 NAME=""
-CONFIG=""
-CONFIG_EXPLICIT=0
+CONFIG="/etc/hysteria/config.yaml"
 PORT="8443"
 SERVER=""
 PASSWORD=""
 SNI="qie.local"
 NO_START=0
+KEEP_DEPS=0
 
 usage() {
   cat <<'EOF'
@@ -17,16 +17,17 @@ Usage:
 
 Options:
   -n, --name NAME          Node name shown in qie
-  -c, --config FILE        Landing sing-box server config path
+  -c, --config FILE        Hysteria2 server config path, default: /etc/hysteria/config.yaml
   -p, --port PORT          Hysteria2 listen port, default: 8443
   --server HOST            Public host/IP used by the original machine
   --password PASSWORD      Hysteria2 password. Generated if omitted.
   --sni NAME               TLS server name, default: qie.local
-  --no-start               Write config and export data without restarting sing-box
+  --no-start               Write config and export data without restarting Hysteria2
+  --keep-deps              Keep helper packages installed by this script
   -h, --help               Show this help
 
-Run this on the landing machine. It detects or installs sing-box, ensures a
-Hysteria2 inbound exists, then prints a QIE_NODE block to paste into qie.
+Run this on the landing machine. It detects or installs Hysteria2, ensures a
+server config exists, then prints a QIE_NODE block to paste into qie.
 EOF
 }
 
@@ -36,7 +37,7 @@ die() {
 }
 
 need_root() {
-  [ "$(id -u)" -eq 0 ] || die "root is required to install or configure sing-box"
+  [ "$(id -u)" -eq 0 ] || die "root is required to install or configure Hysteria2"
 }
 
 have() {
@@ -53,7 +54,6 @@ while [ "$#" -gt 0 ]; do
     -c|--config)
       [ "$#" -ge 2 ] || die "$1 requires a value"
       CONFIG="$2"
-      CONFIG_EXPLICIT=1
       shift 2
       ;;
     -p|--port)
@@ -80,6 +80,10 @@ while [ "$#" -gt 0 ]; do
       NO_START=1
       shift
       ;;
+    --keep-deps)
+      KEEP_DEPS=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -104,32 +108,29 @@ install_base_packages() {
   pm="$(detect_pm)"
   case "$pm" in
     apk)
-      apk add --no-cache curl python3 openssl ca-certificates tar >/dev/null
+      apk add --no-cache curl python3 openssl ca-certificates >/dev/null
       ;;
     apt)
       apt-get update >/dev/null
-      DEBIAN_FRONTEND=noninteractive apt-get install -y curl python3 openssl ca-certificates tar >/dev/null
+      DEBIAN_FRONTEND=noninteractive apt-get install -y curl python3 openssl ca-certificates >/dev/null
       ;;
     *)
-      die "unsupported package manager. Install curl, python3, openssl and sing-box manually."
+      die "unsupported package manager. Install curl, python3 and openssl manually."
       ;;
   esac
 }
 
-install_sing_box_package() {
-  pm="$(detect_pm)"
-  case "$pm" in
-    apk)
-      apk add --no-cache sing-box >/dev/null 2>&1
-      ;;
-    apt)
-      apt-get update >/dev/null
-      DEBIAN_FRONTEND=noninteractive apt-get install -y sing-box >/dev/null 2>&1
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+remove_alpine_package_if_new() {
+  pkg="$1"
+  was_present="$2"
+
+  if [ "$KEEP_DEPS" -eq 1 ] || [ "$was_present" -eq 1 ]; then
+    return
+  fi
+
+  if have apk && apk info -e "$pkg" >/dev/null 2>&1; then
+    apk del "$pkg" >/dev/null 2>&1 || true
+  fi
 }
 
 arch_name() {
@@ -137,43 +138,60 @@ arch_name() {
     x86_64|amd64) echo amd64 ;;
     aarch64|arm64) echo arm64 ;;
     armv7l|armv7*) echo armv7 ;;
+    armv6l|armv6*) echo arm ;;
+    i386|i686) echo 386 ;;
     *) die "unsupported architecture: $(uname -m)" ;;
   esac
 }
 
-install_sing_box_binary() {
-  arch="$(arch_name)"
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+hysteria_bin() {
+  if have hysteria; then
+    command -v hysteria
+    return
+  fi
+  if have hysteria2; then
+    command -v hysteria2
+    return
+  fi
+  if [ -x /usr/local/bin/hysteria ]; then
+    echo /usr/local/bin/hysteria
+    return
+  fi
+  return 1
+}
 
+install_hysteria_binary() {
+  arch="$(arch_name)"
   url="$(python3 - "$arch" <<'PY'
 import json
 import sys
 import urllib.request
 
 arch = sys.argv[1]
-with urllib.request.urlopen('https://api.github.com/repos/SagerNet/sing-box/releases/latest', timeout=20) as r:
+with urllib.request.urlopen('https://api.github.com/repos/apernet/hysteria/releases/latest', timeout=20) as r:
     data = json.load(r)
 
-needle = f'linux-{arch}'
+target = f'hysteria-linux-{arch}'
 for asset in data.get('assets', []):
-    name = asset.get('name', '')
-    if needle in name and name.endswith('.tar.gz'):
+    if asset.get('name') == target:
         print(asset['browser_download_url'])
         break
 else:
-    raise SystemExit(f'no sing-box linux asset found for {arch}')
+    raise SystemExit(f'no Hysteria2 linux asset found for {arch}')
 PY
 )"
-
-  curl -fsSL "$url" -o "$tmp/sing-box.tar.gz"
-  tar -xzf "$tmp/sing-box.tar.gz" -C "$tmp"
-  bin="$(find "$tmp" -type f -name sing-box | head -n 1)"
-  [ -n "$bin" ] || die "sing-box binary not found in downloaded archive"
-  install -m 755 "$bin" /usr/local/bin/sing-box
+  curl -fsSL "$url" -o /usr/local/bin/hysteria
+  chmod 755 /usr/local/bin/hysteria
 }
 
 ensure_dependencies() {
+  HAD_CURL=0
+  HAD_PYTHON3=0
+  HAD_OPENSSL=0
+  have curl && HAD_CURL=1
+  have python3 && HAD_PYTHON3=1
+  have openssl && HAD_OPENSSL=1
+
   missing=0
   have curl || missing=1
   have python3 || missing=1
@@ -185,35 +203,22 @@ ensure_dependencies() {
     install_base_packages
   fi
 
-  if ! have sing-box; then
+  if ! hysteria_bin >/dev/null 2>&1; then
     need_root
-    echo "Installing sing-box..." >&2
-    if ! install_sing_box_package; then
-      install_sing_box_binary
-    fi
+    echo "Installing Hysteria2..." >&2
+    install_hysteria_binary
   fi
 }
 
-detect_config() {
-  if [ -n "$CONFIG" ]; then
-    echo "$CONFIG"
-    return
+cleanup_after_export() {
+  rm -f /etc/s-box/certs/qie-hy2.crt /etc/s-box/certs/qie-hy2.key 2>/dev/null || true
+  rmdir /etc/s-box/certs /etc/s-box 2>/dev/null || true
+
+  if [ "$(detect_pm)" = "apk" ]; then
+    remove_alpine_package_if_new curl "$HAD_CURL"
+    remove_alpine_package_if_new python3 "$HAD_PYTHON3"
+    remove_alpine_package_if_new openssl "$HAD_OPENSSL"
   fi
-
-  for candidate in \
-    /etc/s-box/sb.json \
-    /etc/sing-box/config.json \
-    /usr/local/etc/sing-box/config.json \
-    /etc/s-box/*.json \
-    /etc/sing-box/*.json
-  do
-    if [ -f "$candidate" ]; then
-      echo "$candidate"
-      return
-    fi
-  done
-
-  echo /etc/sing-box/config.json
 }
 
 detect_server() {
@@ -239,23 +244,45 @@ detect_server() {
   echo "$host"
 }
 
+detect_existing_config() {
+  if [ -f "$CONFIG" ]; then
+    echo "$CONFIG"
+    return
+  fi
+
+  for candidate in \
+    /etc/hysteria/config.yaml \
+    /etc/hysteria/config.yml \
+    /etc/hysteria/*.yaml \
+    /etc/hysteria/*.yml
+  do
+    if [ -f "$candidate" ]; then
+      echo "$candidate"
+      return
+    fi
+  done
+
+  echo "$CONFIG"
+}
+
 ensure_service() {
   config="$1"
+  bin="$2"
 
   if [ "$NO_START" -eq 1 ]; then
-    echo "Skipping sing-box restart because --no-start is set." >&2
+    echo "Skipping Hysteria2 restart because --no-start is set." >&2
     return
   fi
 
   if have systemctl; then
-    if ! systemctl cat sing-box.service >/dev/null 2>&1; then
-      cat >/etc/systemd/system/sing-box.service <<EOF
+    if ! systemctl cat hysteria-server.service >/dev/null 2>&1; then
+      cat >/etc/systemd/system/hysteria-server.service <<EOF
 [Unit]
-Description=sing-box service
+Description=Hysteria2 server for QIE
 After=network.target
 
 [Service]
-ExecStart=$(command -v sing-box) run -c $config
+ExecStart=$bin server -c $config
 Restart=on-failure
 RestartSec=10
 LimitNOFILE=infinity
@@ -265,39 +292,39 @@ WantedBy=multi-user.target
 EOF
       systemctl daemon-reload
     fi
-    systemctl enable sing-box >/dev/null 2>&1 || true
-    systemctl restart sing-box
+    systemctl enable hysteria-server >/dev/null 2>&1 || true
+    systemctl restart hysteria-server
     return
   fi
 
   if have rc-service; then
-    if [ ! -x /etc/init.d/sing-box ]; then
-      cat >/etc/init.d/sing-box <<EOF
+    if [ ! -x /etc/init.d/hysteria-server ]; then
+      cat >/etc/init.d/hysteria-server <<EOF
 #!/sbin/openrc-run
-name="sing-box"
-description="sing-box service"
-command="$(command -v sing-box)"
-command_args="run -c $config"
+name="hysteria-server"
+description="Hysteria2 server for QIE"
+command="$bin"
+command_args="server -c $config"
 command_background="yes"
-pidfile="/run/sing-box.pid"
+pidfile="/run/hysteria-server.pid"
 
 depend() {
   need net
 }
 EOF
-      chmod +x /etc/init.d/sing-box
+      chmod +x /etc/init.d/hysteria-server
     fi
-    rc-update add sing-box default >/dev/null 2>&1 || true
-    rc-service sing-box restart
+    rc-update add hysteria-server default >/dev/null 2>&1 || true
+    rc-service hysteria-server restart
     return
   fi
 
   if have service; then
-    service sing-box restart
+    service hysteria-server restart
     return
   fi
 
-  die "cannot restart sing-box: no systemctl, rc-service or service found"
+  die "cannot restart Hysteria2: no systemctl, rc-service or service found"
 }
 
 if [ -z "$NAME" ]; then
@@ -309,14 +336,15 @@ case "$PORT" in
 esac
 
 ensure_dependencies
-CONFIG="$(detect_config)"
+CONFIG="$(detect_existing_config)"
 SERVER="$(detect_server)"
+HYSTERIA="$(hysteria_bin)"
 
 need_root
-mkdir -p "$(dirname "$CONFIG")" /etc/s-box/certs
+mkdir -p "$(dirname "$CONFIG")" /etc/hysteria/certs
 
-CERT="/etc/s-box/certs/qie-hy2.crt"
-KEY="/etc/s-box/certs/qie-hy2.key"
+CERT="/etc/hysteria/certs/qie-hy2.crt"
+KEY="/etc/hysteria/certs/qie-hy2.key"
 
 if [ ! -f "$CERT" ] || [ ! -f "$KEY" ]; then
   echo "Generating self-signed TLS certificate..." >&2
@@ -332,7 +360,7 @@ PY
 )"
 fi
 
-echo "Ensuring Hysteria2 inbound in: $CONFIG" >&2
+echo "Ensuring Hysteria2 server config in: $CONFIG" >&2
 
 EXPORT_TMP="$(mktemp)"
 trap 'rm -f "$EXPORT_TMP"' EXIT HUP INT TERM
@@ -341,6 +369,7 @@ python3 - "$CONFIG" "$PORT" "$PASSWORD" "$CERT" "$KEY" "$SERVER" "$SNI" "$NAME" 
 import base64
 import json
 import os
+import re
 import shutil
 import socket
 import sys
@@ -349,87 +378,57 @@ import time
 config_path, port, password, cert, key, server, sni, name, export_path = sys.argv[1:]
 port = int(port)
 
-def load_config(path):
+def read_text(path):
     if not os.path.exists(path):
-        return {}
+        return ''
     with open(path, 'r', encoding='utf-8-sig') as f:
-        return json.load(f)
+        return f.read()
 
-def save_config(path, data):
+def write_text(path, text):
     if os.path.exists(path):
         backup = path + '.qie.bak'
         shutil.copy2(path, backup)
         print(f'Backup: {backup}', file=sys.stderr)
     tmp = path + '.tmp'
     with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.write('\n')
+        f.write(text)
     os.replace(tmp, path)
 
-def ensure_list(data, key_name):
-    if not isinstance(data.get(key_name), list):
-        data[key_name] = []
-    return data[key_name]
+def find_scalar(text, key_name):
+    m = re.search(rf'(?m)^\s*{re.escape(key_name)}\s*:\s*["\']?([^"\'\n#]+)', text)
+    return m.group(1).strip() if m else None
 
-def find_hy2_inbound(data):
-    for inbound in data.get('inbounds', []):
-        if isinstance(inbound, dict) and inbound.get('type') in ('hysteria2', 'hy2'):
-            return inbound
-    return None
+existing = read_text(config_path)
 
-server_config = load_config(config_path)
-hy2 = find_hy2_inbound(server_config)
-
-if hy2 is None:
-    inbounds = ensure_list(server_config, 'inbounds')
-    hy2 = {
-        'type': 'hysteria2',
-        'tag': 'qie-hy2-in',
-        'listen': '::',
-        'listen_port': port,
-        'users': [
-            {
-                'name': 'qie',
-                'password': password,
-            }
-        ],
-        'tls': {
-            'enabled': True,
-            'certificate_path': cert,
-            'key_path': key,
-        },
-    }
-    inbounds.append(hy2)
-
-    outbounds = ensure_list(server_config, 'outbounds')
-    if not any(isinstance(o, dict) and o.get('tag') == 'direct' for o in outbounds):
-        outbounds.append({'type': 'direct', 'tag': 'direct'})
-
-    server_config.setdefault('route', {})
-    if isinstance(server_config['route'], dict):
-        server_config['route'].setdefault('final', 'direct')
-
-    save_config(config_path, server_config)
-    print('Created Hysteria2 inbound.', file=sys.stderr)
+if existing.strip():
+    listen = find_scalar(existing, 'listen')
+    auth = find_scalar(existing, 'password')
+    if auth:
+        password = auth
+    if listen:
+        m = re.search(r':(\d+)$', listen)
+        if m:
+            port = int(m.group(1))
+    print('Detected existing Hysteria2 config.', file=sys.stderr)
 else:
-    port = int(hy2.get('listen_port') or port)
-    users = hy2.get('users') if isinstance(hy2.get('users'), list) else []
-    found_password = hy2.get('password') if isinstance(hy2.get('password'), str) else None
-    for user in users:
-        if isinstance(user, dict) and user.get('password'):
-            found_password = user['password']
-            break
-    if found_password:
-        password = found_password
-    else:
-        if not isinstance(hy2.get('users'), list):
-            hy2['users'] = []
-        hy2['users'].append({'name': 'qie', 'password': password})
-        save_config(config_path, server_config)
-        print('Added qie user to existing Hysteria2 inbound.', file=sys.stderr)
-    tls = hy2.get('tls') if isinstance(hy2.get('tls'), dict) else {}
-    sni = tls.get('server_name') or sni
-    print('Detected existing Hysteria2 inbound.', file=sys.stderr)
+    text = f'''listen: :{port}
+
+tls:
+  cert: {cert}
+  key: {key}
+
+auth:
+  type: password
+  password: {password}
+
+masquerade:
+  type: proxy
+  proxy:
+    url: https://www.bing.com/
+    rewriteHost: true
+'''
+    write_text(config_path, text)
+    print('Created Hysteria2 config.', file=sys.stderr)
 
 client_config = {
     'log': {
@@ -490,9 +489,6 @@ with open(export_path, 'w', encoding='utf-8', newline='\n') as f:
     f.write('QIE_NODE_END\n')
 PY
 
-if sing-box check -c "$CONFIG" >/dev/null 2>&1; then
-  ensure_service "$CONFIG"
-  cat "$EXPORT_TMP"
-else
-  die "generated sing-box server config failed validation: $CONFIG"
-fi
+ensure_service "$CONFIG" "$HYSTERIA"
+cat "$EXPORT_TMP"
+cleanup_after_export

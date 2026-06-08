@@ -1,6 +1,6 @@
 # QIE
 
-`qie` 是一个用于管理和切换 sing-box 落地机配置的命令行脚本。
+`qie` 是一个用于管理和切换落地机配置的命令行脚本。原机器使用 sing-box，落地机使用 Hysteria2 服务端承接流量。
 
 它不主动 SSH 到落地机。正确流程是：
 
@@ -51,13 +51,22 @@ apk add --no-cache curl python3 && curl -fsSL https://raw.githubusercontent.com/
 
 导出脚本会在落地机上自动执行这些动作：
 
-1. 检测 `python3`、`curl`、`openssl` 和 `sing-box`。
+1. 检测 `python3`、`curl`、`openssl` 和 Hysteria2。
 2. 如果缺少基础依赖，会用当前系统的包管理器安装。
-3. 如果没有 `sing-box`，优先用系统包管理器安装；失败时从 sing-box GitHub Release 下载二进制。
-4. 检测 sing-box 配置里是否已有 `hysteria2` / `hy2` inbound。
-5. 如果没有 hy2 inbound，自动生成自签 TLS 证书、随机密码和 hy2 inbound，作为落地承接流量入口。
-6. 校验并重启 sing-box。
-7. 输出原机器可粘贴导入的 `QIE_NODE_BEGIN` 数据块。
+3. 如果没有 Hysteria2，会从 Hysteria GitHub Release 下载二进制。
+4. 检测 Hysteria2 服务端配置。
+5. 如果没有配置，自动生成自签 TLS 证书、随机密码和 Hysteria2 服务端配置。
+6. 校验并重启 Hysteria2 服务。
+7. 输出原机器可粘贴导入的 `QIE_NODE_BEGIN` 数据块。这个数据块里是原机器 sing-box 使用的 hysteria2 outbound 配置。
+8. 清理本脚本的临时文件；在 Alpine 上，如果 `curl`、`python3`、`openssl` 是本脚本临时安装的，会在导出完成后尝试移除。
+
+Hysteria2 二进制、服务文件、配置和证书是落地机运行所必需的，不会删除。
+
+如果希望保留本脚本安装的辅助依赖：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie-export-node | sh -s -- -n my-node --keep-deps
+```
 
 命令会输出类似下面的数据块：
 
@@ -75,28 +84,27 @@ sudo qie add
 
 然后粘贴整段数据块即可。
 
-导出脚本会自动尝试以下 sing-box 配置路径：
+导出脚本会自动尝试以下 Hysteria2 配置路径：
 
-- `/etc/s-box/sb.json`
-- `/etc/sing-box/config.json`
-- `/usr/local/etc/sing-box/config.json`
-- `/etc/s-box/*.json`
-- `/etc/sing-box/*.json`
+- `/etc/hysteria/config.yaml`
+- `/etc/hysteria/config.yml`
+- `/etc/hysteria/*.yaml`
+- `/etc/hysteria/*.yml`
 
-如果都不存在，会创建 `/etc/sing-box/config.json`。
+如果都不存在，会创建 `/etc/hysteria/config.yaml`。
 
-如果想手动指定落地机上的服务端配置路径：
+如果想手动指定落地机上的 Hysteria2 服务端配置路径：
 
 Debian / Ubuntu：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie-export-node | sudo sh -s -- -n my-node -c /path/to/sb.json
+curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie-export-node | sudo sh -s -- -n my-node -c /path/to/config.yaml
 ```
 
 Alpine：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie-export-node | sh -s -- -n my-node -c /path/to/sb.json
+curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie-export-node | sh -s -- -n my-node -c /path/to/config.yaml
 ```
 
 如果自动探测的公网 IP 不正确，手动指定原机器连接落地机时使用的地址：
@@ -117,6 +125,7 @@ curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie-expo
 - 原机器使用 `systemd` 或 OpenRC
 - 原机器已安装 `sing-box`
 - 原机器 sing-box 服务名为 `sing-box`
+- 落地机需要开放 Hysteria2 UDP 端口，默认 `8443/udp`
 - `qie` 需要 root 权限运行
 
 `qie` 在原机器上使用以下路径：
