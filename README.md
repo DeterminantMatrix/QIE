@@ -71,6 +71,36 @@ sudo qie status
 sudo qie test
 ```
 
+## 从落地机拉取配置 JSON
+
+`qie-pull-config` 可以通过 SSH 从落地机的 `/etc/s-box/*.json` 拉取配置文件，校验 JSON 后安装到本机 `/etc/s-box`。
+
+一键安装并拉取：
+
+```bash
+REMOTE=root@1.2.3.4; sudo apt update && sudo apt install -y curl python3 openssh-client tar && tmp=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie-pull-config -o "$tmp" && sudo install -m 755 "$tmp" /usr/local/bin/qie-pull-config && rm -f "$tmp" && sudo qie-pull-config "$REMOTE"
+```
+
+把 `root@1.2.3.4` 换成你的落地机 SSH 地址。
+
+如果 SSH 端口不是 22：
+
+```bash
+sudo qie-pull-config -p 2222 root@1.2.3.4
+```
+
+如果使用密钥：
+
+```bash
+sudo qie-pull-config -i ~/.ssh/id_ed25519 root@1.2.3.4
+```
+
+默认远端目录和本机目录都是 `/etc/s-box`，也可以手动指定：
+
+```bash
+sudo qie-pull-config --remote-dir /etc/s-box --local-dir /etc/s-box root@1.2.3.4
+```
+
 ## 更新
 
 ```bash

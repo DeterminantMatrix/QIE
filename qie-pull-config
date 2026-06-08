@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REMOTE=""
+REMOTE_DIR="/etc/s-box"
+LOCAL_DIR="/etc/s-box"
+SSH_PORT=""
+IDENTITY_FILE=""
+REMOTE_SUDO="sudo"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  qie-pull-config [options] user@host
+
+Options:
+  -p, --port PORT          SSH port
+  -i, --identity FILE      SSH identity file
+  --remote-dir DIR         Remote config directory, default: /etc/s-box
+  --local-dir DIR          Local config directory, default: /etc/s-box
+  --no-remote-sudo         Do not use sudo on the remote host
+  -h, --help               Show this help
+
+Examples:
+  sudo qie-pull-config root@1.2.3.4
+  sudo qie-pull-config -p 2222 debian@1.2.3.4
+  sudo qie-pull-config -i ~/.ssh/id_ed25519 ubuntu@1.2.3.4
+EOF
+}
+
+die() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -p|--port)
+      [ "$#" -ge 2 ] || die "$1 requires a value"
+      SSH_PORT="$2"
+      shift 2
+      ;;
+    -i|--identity)
+      [ "$#" -ge 2 ] || die "$1 requires a value"
+      IDENTITY_FILE="$2"
+      shift 2
+      ;;
+    --remote-dir)
+      [ "$#" -ge 2 ] || die "$1 requires a value"
+      REMOTE_DIR="${2%/}"
+      shift 2
+      ;;
+    --local-dir)
+      [ "$#" -ge 2 ] || die "$1 requires a value"
+      LOCAL_DIR="${2%/}"
+      shift 2
+      ;;
+    --no-remote-sudo)
+      REMOTE_SUDO=""
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      die "unknown option: $1"
+      ;;
+    *)
+      [ -z "$REMOTE" ] || die "only one remote host is allowed"
+      REMOTE="$1"
+      shift
+      ;;
+  esac
+done
+
+[ -n "$REMOTE" ] || {
+  usage
+  exit 1
+}
+
+need_cmd ssh
+need_cmd tar
+need_cmd python3
+need_cmd install
+
+SSH_OPTS=(-o BatchMode=no)
+if [ -n "$SSH_PORT" ]; then
+  SSH_OPTS+=(-p "$SSH_PORT")
+fi
+if [ -n "$IDENTITY_FILE" ]; then
+  SSH_OPTS+=(-i "$IDENTITY_FILE")
+fi
+
+TMP_DIR="$(mktemp -d)"
+cleanup() {
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+REMOTE_SCRIPT='
+set -e
+cd "$1"
+set -- *.json
+[ -e "$1" ] || {
+  echo "no json files found in $PWD" >&2
+  exit 2
+}
+tar -cf - "$@"
+'
+
+echo "Pulling JSON configs from ${REMOTE}:${REMOTE_DIR} ..."
+if [ -n "$REMOTE_SUDO" ]; then
+  ssh "${SSH_OPTS[@]}" "$REMOTE" "$REMOTE_SUDO sh -s -- '$REMOTE_DIR'" <<<"$REMOTE_SCRIPT" | tar -xf - -C "$TMP_DIR"
+else
+  ssh "${SSH_OPTS[@]}" "$REMOTE" "sh -s -- '$REMOTE_DIR'" <<<"$REMOTE_SCRIPT" | tar -xf - -C "$TMP_DIR"
+fi
+
+shopt -s nullglob
+JSON_FILES=("$TMP_DIR"/*.json)
+[ "${#JSON_FILES[@]}" -gt 0 ] || die "no json files were downloaded"
+
+for file in "${JSON_FILES[@]}"; do
+  python3 -m json.tool "$file" >/dev/null || die "invalid JSON: $(basename "$file")"
+done
+
+install -d -m 755 "$LOCAL_DIR"
+
+for file in "${JSON_FILES[@]}"; do
+  name="$(basename "$file")"
+  install -m 644 "$file" "$LOCAL_DIR/$name"
+  echo "Installed: $LOCAL_DIR/$name"
+done
+
+echo "Done. Run 'sudo qie status' or 'sudo qie test' to verify."
