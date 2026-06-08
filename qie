@@ -672,6 +672,51 @@ def print_nodes():
         print(f"{mark} {i}. {node['id']}  {node_label(node)}  {endpoint_text(ep)}")
 
 
+def rename_node(key=None, new_name=None):
+    nodes = load_index()
+    if not nodes:
+        print('暂无落地机配置')
+        return
+
+    if not key:
+        print_nodes()
+        try:
+            key = input('输入要重命名的节点编号或名称: ').strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            die('已取消')
+
+    node = None
+    if key.isdigit():
+        idx = int(key) - 1
+        if 0 <= idx < len(nodes):
+            node = nodes[idx]
+
+    if not node:
+        node = find_node(key)
+
+    if not node:
+        die('错误: 未找到节点 - ' + key)
+
+    if not new_name:
+        try:
+            new_name = input('输入新的落地机名称: ').strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            die('已取消')
+
+    if not new_name:
+        die('错误: 名称不能为空')
+
+    for item in nodes:
+        if item['id'] == node['id']:
+            item['name'] = new_name
+            break
+
+    save_index(nodes)
+    print(f"已重命名: {node['id']} -> {new_name}")
+
+
 def print_test():
     nodes = load_index()
     if not nodes:
@@ -734,6 +779,7 @@ def print_menu():
         print(f" {i}. {node_label(node)}")
 
     print(' a. 录入落地机')
+    print(' r. 重命名落地机')
     print(' d. 直连')
     print(' s. 状态')
     print(' t. 测速')
@@ -753,6 +799,8 @@ def print_menu():
         die('错误: 无效选择')
     elif ch in ('a', 'add', 'import'):
         import_node()
+    elif ch in ('r', 'rename'):
+        rename_node()
     elif ch in ('d', 'direct', 'dir'):
         switch_direct()
     elif ch in ('s', 'st', 'status'):
@@ -768,6 +816,7 @@ def usage():
     print('  qie')
     print('  qie add|import')
     print('  qie list')
+    print('  qie rename <节点编号或名称> <新名称>')
     print('  qie <节点编号或名称>')
     print('  qie direct')
     print('  qie status')
@@ -792,6 +841,10 @@ def main():
         import_node()
     elif low in ('list', 'ls'):
         print_nodes()
+    elif low in ('rename', 'ren', 'r'):
+        key = sys.argv[2].strip() if len(sys.argv) > 2 else None
+        new_name = ' '.join(sys.argv[3:]).strip() if len(sys.argv) > 3 else None
+        rename_node(key, new_name)
     elif low in ('direct', 'dir', 'd'):
         switch_direct()
     elif low in ('status', 'st', 's'):

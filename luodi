@@ -14,7 +14,7 @@ YES=0
 usage() {
   cat <<'EOF'
 用法:
-  qie-export-node [选项]
+  luodi [选项]
 
 选项:
   -n, --name NAME          qie 菜单中显示的节点名称
@@ -78,6 +78,27 @@ ask_yes_no() {
     '') [ "$default" = "y" ] ;;
     *) return 1 ;;
   esac
+}
+
+ask_node_name() {
+  if [ -n "$NAME" ]; then
+    return
+  fi
+
+  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    while :; do
+      printf "请为这台落地机起一个名字: " >/dev/tty
+      IFS= read -r input_name </dev/tty || input_name=""
+      input_name="$(printf "%s" "$input_name" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+      if [ -n "$input_name" ]; then
+        NAME="$input_name"
+        return
+      fi
+      echo "名称不能为空。" >/dev/tty
+    done
+  fi
+
+  NAME="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo node)"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -647,9 +668,7 @@ EOF
   detect_existing_hy2 "$DETECT_TMP" || true
 }
 
-if [ -z "$NAME" ]; then
-  NAME="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo node)"
-fi
+ask_node_name
 
 case "$PORT" in
   *[!0-9]*|'') die "无效端口: $PORT" ;;
