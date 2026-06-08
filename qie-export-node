@@ -13,33 +13,33 @@ YES=0
 
 usage() {
   cat <<'EOF'
-Usage:
-  qie-export-node [options]
+用法:
+  qie-export-node [选项]
 
-Options:
-  -n, --name NAME          Node name shown in qie
-  -c, --config FILE        Hysteria2 server config path, default: /etc/hysteria/config.yaml
-  -p, --port PORT          Hysteria2 listen port, default: 8443
-  --server HOST            Public host/IP used by the original machine
-  --password PASSWORD      Hysteria2 password. Generated if omitted.
-  --sni NAME               TLS server name, default: qie.local
-  --no-start               Write config and export data without restarting Hysteria2
-  --keep-deps              Keep helper packages installed by this script
-  -y, --yes                Non-interactive: install missing hy2 and export
-  -h, --help               Show this help
+选项:
+  -n, --name NAME          qie 菜单中显示的节点名称
+  -c, --config FILE        Hysteria2 服务端配置路径，默认 /etc/hysteria/config.yaml
+  -p, --port PORT          Hysteria2 监听端口，默认 8443
+  --server HOST            原机器连接落地机时使用的公网地址/IP
+  --password PASSWORD      Hysteria2 密码；不填则自动生成
+  --sni NAME               TLS SNI，默认 qie.local
+  --no-start               写入配置和导出数据，但不重启 Hysteria2
+  --keep-deps              保留本脚本安装的辅助依赖
+  -y, --yes                非交互：自动安装缺失 hy2 并导出
+  -h, --help               显示帮助
 
-Run this on the landing machine. It prints detection results first, then asks
-whether to install Hysteria2, install BBR, and export a QIE_NODE block.
+在落地机上运行。本脚本会先显示检测结果，再询问是否安装 Hysteria2、
+是否启用 BBR、是否导出 QIE_NODE 数据块。
 EOF
 }
 
 die() {
-  echo "Error: $*" >&2
+  echo "错误: $*" >&2
   exit 1
 }
 
 warn() {
-  echo "Warning: $*" >&2
+  echo "警告: $*" >&2
 }
 
 have() {
@@ -47,7 +47,7 @@ have() {
 }
 
 need_root() {
-  [ "$(id -u)" -eq 0 ] || die "root is required for this action"
+  [ "$(id -u)" -eq 0 ] || die "该操作需要 root 权限"
 }
 
 ask_yes_no() {
@@ -56,7 +56,7 @@ ask_yes_no() {
   auto="${3:-1}"
 
   if [ "$YES" -eq 1 ] && [ "$auto" -eq 1 ]; then
-    echo "$prompt: yes (auto)" >&2
+    echo "$prompt: 是（自动确认）" >&2
     return 0
   fi
 
@@ -83,32 +83,32 @@ ask_yes_no() {
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -n|--name)
-      [ "$#" -ge 2 ] || die "$1 requires a value"
+      [ "$#" -ge 2 ] || die "$1 需要参数值"
       NAME="$2"
       shift 2
       ;;
     -c|--config)
-      [ "$#" -ge 2 ] || die "$1 requires a value"
+      [ "$#" -ge 2 ] || die "$1 需要参数值"
       CONFIG="$2"
       shift 2
       ;;
     -p|--port)
-      [ "$#" -ge 2 ] || die "$1 requires a value"
+      [ "$#" -ge 2 ] || die "$1 需要参数值"
       PORT="$2"
       shift 2
       ;;
     --server)
-      [ "$#" -ge 2 ] || die "$1 requires a value"
+      [ "$#" -ge 2 ] || die "$1 需要参数值"
       SERVER="$2"
       shift 2
       ;;
     --password)
-      [ "$#" -ge 2 ] || die "$1 requires a value"
+      [ "$#" -ge 2 ] || die "$1 需要参数值"
       PASSWORD="$2"
       shift 2
       ;;
     --sni)
-      [ "$#" -ge 2 ] || die "$1 requires a value"
+      [ "$#" -ge 2 ] || die "$1 需要参数值"
       SNI="$2"
       shift 2
       ;;
@@ -129,7 +129,7 @@ while [ "$#" -gt 0 ]; do
       exit 0
       ;;
     *)
-      die "unknown option: $1"
+      die "未知选项: $1"
       ;;
   esac
 done
@@ -155,7 +155,7 @@ install_packages() {
       DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null
       ;;
     *)
-      die "unsupported package manager. Install required packages manually: $*"
+      die "不支持的包管理器，请手动安装依赖: $*"
       ;;
   esac
 }
@@ -175,7 +175,7 @@ ensure_base_dependencies() {
 
   if [ -n "$missing" ]; then
     need_root
-    echo "Installing base dependencies:$missing" >&2
+    echo "正在安装基础依赖:$missing" >&2
     install_packages $missing ca-certificates
   fi
 }
@@ -211,7 +211,7 @@ arch_name() {
     armv7l|armv7*) echo armv7 ;;
     armv6l|armv6*) echo arm ;;
     i386|i686) echo 386 ;;
-    *) die "unsupported architecture: $(uname -m)" ;;
+    *) die "不支持的架构: $(uname -m)" ;;
   esac
 }
 
@@ -249,10 +249,10 @@ for asset in data.get('assets', []):
         print(asset['browser_download_url'])
         break
 else:
-    raise SystemExit(f'no Hysteria2 linux asset found for {arch}')
+    raise SystemExit(f'未找到适用于 {arch} 的 Hysteria2 Linux 二进制')
 PY
 )"
-  echo "Installing Hysteria2 binary..." >&2
+  echo "正在安装 Hysteria2 二进制..." >&2
   curl -fsSL "$url" -o /usr/local/bin/hysteria
   chmod 755 /usr/local/bin/hysteria
 }
@@ -276,7 +276,7 @@ detect_server() {
   done
 
   host="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
-  [ -n "$host" ] || die "cannot detect public IP. Use --server HOST."
+  [ -n "$host" ] || die "无法自动检测公网 IP，请使用 --server HOST 指定"
   echo "$host"
 }
 
@@ -402,7 +402,7 @@ for path in singbox_paths:
     try:
         parsed = parse_singbox_config(path)
     except Exception as e:
-        print(f'Skip unreadable sing-box config {path}: {e}', file=sys.stderr)
+        print(f'跳过无法读取的 sing-box 配置 {path}: {e}', file=sys.stderr)
         continue
     if parsed:
         write(parsed)
@@ -441,16 +441,16 @@ bbr_available() {
 install_bbr() {
   need_root
   if ! have bash; then
-    echo "Installing bash for BBR helper..." >&2
+    echo "正在为 BBR 工具安装 bash..." >&2
     install_packages bash
   fi
   have curl || install_packages curl
 
-  echo "Running BBR helper..." >&2
+  echo "正在运行 BBR 工具..." >&2
   if [ -r /dev/tty ]; then
-    bash -c 'set -e; bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/install-alias.sh?$(date +%s)"); [ -f ~/.bashrc ] && source ~/.bashrc || true; command -v bbr >/dev/null 2>&1 && bbr || { echo "bbr command not found after install" >&2; exit 1; }' </dev/tty
+    bash -c 'set -e; bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/install-alias.sh?$(date +%s)"); [ -f ~/.bashrc ] && source ~/.bashrc || true; command -v bbr >/dev/null 2>&1 && bbr || { echo "安装后未找到 bbr 命令" >&2; exit 1; }' </dev/tty
   else
-    bash -c 'set -e; bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/install-alias.sh?$(date +%s)"); [ -f ~/.bashrc ] && source ~/.bashrc || true; command -v bbr >/dev/null 2>&1 && bbr || { echo "bbr command not found after install" >&2; exit 1; }'
+    bash -c 'set -e; bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/install-alias.sh?$(date +%s)"); [ -f ~/.bashrc ] && source ~/.bashrc || true; command -v bbr >/dev/null 2>&1 && bbr || { echo "安装后未找到 bbr 命令" >&2; exit 1; }'
   fi
 }
 
@@ -536,7 +536,7 @@ ensure_service() {
   bin="$2"
 
   if [ "$NO_START" -eq 1 ]; then
-    echo "Skipping Hysteria2 restart because --no-start is set." >&2
+    echo "已设置 --no-start，跳过 Hysteria2 重启。" >&2
     return
   fi
 
@@ -590,7 +590,7 @@ EOF
     return
   fi
 
-  die "cannot restart Hysteria2: no systemctl, rc-service or service found"
+  die "无法重启 Hysteria2：未找到 systemctl、rc-service 或 service"
 }
 
 create_hysteria_config() {
@@ -609,7 +609,7 @@ create_hysteria_config() {
   key="/etc/hysteria/certs/qie-hy2.key"
 
   if [ ! -f "$cert" ] || [ ! -f "$key" ]; then
-    echo "Generating self-signed TLS certificate..." >&2
+    echo "正在生成自签 TLS 证书..." >&2
     openssl req -x509 -newkey rsa:2048 -keyout "$key" -out "$cert" -days 3650 -nodes -subj "/CN=$SNI" >/dev/null 2>&1
     chmod 600 "$key"
   fi
@@ -652,7 +652,7 @@ if [ -z "$NAME" ]; then
 fi
 
 case "$PORT" in
-  *[!0-9]*|'') die "invalid port: $PORT" ;;
+  *[!0-9]*|'') die "无效端口: $PORT" ;;
 esac
 
 ensure_base_dependencies
@@ -678,34 +678,34 @@ BBR_CURRENT="$(bbr_current)"
 BBR_AVAILABLE="$(bbr_available)"
 
 echo "========================"
-echo " QIE landing detection"
+echo " QIE 落地机检测"
 echo "========================"
 if [ "$HY2_EXISTS" -eq 1 ]; then
-  echo "hy2: yes ($(json_field "$DETECT_TMP" kind), $(json_field "$DETECT_TMP" path), port $(json_field "$DETECT_TMP" port))"
+  echo "hy2: 有 ($(json_field "$DETECT_TMP" kind), $(json_field "$DETECT_TMP" path), 端口 $(json_field "$DETECT_TMP" port))"
 else
-  echo "hy2: no"
+  echo "hy2: 无"
 fi
 if [ "$SINGBOX_EXISTS" -eq 1 ]; then
-  echo "sing-box: yes"
+  echo "sing-box: 有"
 else
-  echo "sing-box: no"
+  echo "sing-box: 无"
 fi
-echo "bbr: current=$BBR_CURRENT available=$BBR_AVAILABLE"
-echo "server: $SERVER"
+echo "BBR: 当前=$BBR_CURRENT 可用=$BBR_AVAILABLE"
+echo "连接地址: $SERVER"
 echo "========================"
 
 if [ "$BBR_CURRENT" != "bbr" ]; then
-  if ask_yes_no "Install/enable BBR now" "n" 0; then
+  if ask_yes_no "现在安装/启用 BBR" "n" 0; then
     if ! install_bbr; then
-      warn "BBR helper failed or was blocked by the container/host. Continuing."
+      warn "BBR 工具失败，或被容器/宿主机限制；继续执行后续步骤。"
     fi
     BBR_CURRENT="$(bbr_current)"
-    echo "bbr after action: current=$BBR_CURRENT"
+    echo "BBR 执行后: 当前=$BBR_CURRENT"
   fi
 fi
 
 if [ "$HY2_EXISTS" -eq 0 ]; then
-  if ask_yes_no "No hy2 found. Install standalone Hysteria2 now" "n"; then
+  if ask_yes_no "未检测到 hy2，现在安装独立 Hysteria2" "n"; then
     create_hysteria_config
     if detect_existing_hy2 "$DETECT_TMP"; then
       HY2_EXISTS=1
@@ -714,12 +714,12 @@ if [ "$HY2_EXISTS" -eq 0 ]; then
 fi
 
 if [ "$HY2_EXISTS" -eq 0 ]; then
-  warn "No hy2 is available. Nothing to export."
+  warn "没有可用 hy2，无法导出。"
   cleanup_after_export
   exit 0
 fi
 
-if ask_yes_no "Export QIE import data now" "y"; then
+if ask_yes_no "现在导出 QIE 导入数据" "y"; then
   emit_export \
     "$(json_field "$DETECT_TMP" path)" \
     "$(json_field "$DETECT_TMP" port)" \
@@ -727,7 +727,7 @@ if ask_yes_no "Export QIE import data now" "y"; then
     "$EXPORT_TMP"
   cat "$EXPORT_TMP"
 else
-  echo "Export skipped."
+  echo "已跳过导出。"
 fi
 
 cleanup_after_export
