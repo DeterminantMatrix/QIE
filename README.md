@@ -49,6 +49,16 @@ apk add --no-cache curl python3 && curl -fsSL https://raw.githubusercontent.com/
 
 把 `my-node` 换成你想显示在 `qie` 菜单里的名称。
 
+导出脚本会在落地机上自动执行这些动作：
+
+1. 检测 `python3`、`curl`、`openssl` 和 `sing-box`。
+2. 如果缺少基础依赖，会用当前系统的包管理器安装。
+3. 如果没有 `sing-box`，优先用系统包管理器安装；失败时从 sing-box GitHub Release 下载二进制。
+4. 检测 sing-box 配置里是否已有 `hysteria2` / `hy2` inbound。
+5. 如果没有 hy2 inbound，自动生成自签 TLS 证书、随机密码和 hy2 inbound，作为落地承接流量入口。
+6. 校验并重启 sing-box。
+7. 输出原机器可粘贴导入的 `QIE_NODE_BEGIN` 数据块。
+
 命令会输出类似下面的数据块：
 
 ```text
@@ -65,7 +75,17 @@ sudo qie add
 
 然后粘贴整段数据块即可。
 
-如果落地机的 sing-box 配置不是 `/etc/s-box/sb.json`，可以指定路径：
+导出脚本会自动尝试以下 sing-box 配置路径：
+
+- `/etc/s-box/sb.json`
+- `/etc/sing-box/config.json`
+- `/usr/local/etc/sing-box/config.json`
+- `/etc/s-box/*.json`
+- `/etc/sing-box/*.json`
+
+如果都不存在，会创建 `/etc/sing-box/config.json`。
+
+如果想手动指定落地机上的服务端配置路径：
 
 Debian / Ubuntu：
 
@@ -77,6 +97,18 @@ Alpine：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie-export-node | sh -s -- -n my-node -c /path/to/sb.json
+```
+
+如果自动探测的公网 IP 不正确，手动指定原机器连接落地机时使用的地址：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie-export-node | sh -s -- -n my-node --server 1.2.3.4
+```
+
+如果要指定 hy2 端口：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie-export-node | sh -s -- -n my-node -p 8443
 ```
 
 ## 前置条件
