@@ -47,6 +47,12 @@ Alpine：
 apk add --no-cache curl python3 && curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh
 ```
 
+Alpine/LXC 机器无法可靠自动获取公网 IP。`luodi` 检测到 Alpine 时会要求输入落地机公网 IP 或域名；也可以直接用 `--server` 指定：
+
+```sh
+curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node --server 1.2.3.4
+```
+
 如果没有用 `-n` 指定名称，脚本会要求你为这台落地机起名，并把这个名字写入 `QIE_NODE` 数据块。也可以直接指定：
 
 ```sh

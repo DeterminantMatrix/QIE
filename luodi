@@ -140,6 +140,32 @@ ask_port_value() {
   done
 }
 
+ask_server_host() {
+  default="${1:-}"
+
+  if [ "$YES" -eq 1 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+    echo "$default"
+    return
+  fi
+
+  while :; do
+    if [ -n "$default" ]; then
+      printf "检测到 Alpine/LXC，请输入落地机公网 IP 或域名 [%s]: " "$default" >/dev/tty
+    else
+      printf "检测到 Alpine/LXC，请输入落地机公网 IP 或域名: " >/dev/tty
+    fi
+
+    IFS= read -r input_host </dev/tty || input_host=""
+    input_host="$(printf "%s" "$input_host" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -n "$input_host" ] || input_host="$default"
+
+    case "$input_host" in
+      *[[:space:]]*|'') echo "公网 IP 或域名不能为空，且不能包含空格。" >/dev/tty ;;
+      *) echo "$input_host"; return ;;
+    esac
+  done
+}
+
 ask_hysteria_port() {
   if [ "$PORT_SET" -eq 0 ]; then
     PORT="$(ask_port_value "请输入 Hysteria2 监听 UDP 端口" "$PORT")"
@@ -329,6 +355,15 @@ detect_server() {
   if [ -n "$SERVER" ]; then
     echo "$SERVER"
     return
+  fi
+
+  if [ "$(detect_pm)" = "apk" ]; then
+    typed="$(ask_server_host "")"
+    if [ -n "$typed" ]; then
+      echo "$typed"
+      return
+    fi
+    warn "Alpine/LXC 未输入公网 IP，尝试自动探测；如结果不正确，请使用 --server HOST。"
   fi
 
   for url in \
