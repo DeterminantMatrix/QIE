@@ -51,14 +51,15 @@ apk add --no-cache curl python3 && curl -fsSL https://raw.githubusercontent.com/
 
 导出脚本会在落地机上自动执行这些动作：
 
-1. 检测 `python3`、`curl`、`openssl` 和 Hysteria2。
+1. 检测 `python3`、`curl`、`openssl`。
 2. 如果缺少基础依赖，会用当前系统的包管理器安装。
-3. 如果没有 Hysteria2，会从 Hysteria GitHub Release 下载二进制。
-4. 检测 Hysteria2 服务端配置。
-5. 如果没有配置，自动生成自签 TLS 证书、随机密码和 Hysteria2 服务端配置。
-6. 校验并重启 Hysteria2 服务。
-7. 输出原机器可粘贴导入的 `QIE_NODE_BEGIN` 数据块。这个数据块里是原机器 sing-box 使用的 hysteria2 outbound 配置。
-8. 清理本脚本的临时文件；在 Alpine 上，如果 `curl`、`python3`、`openssl` 是本脚本临时安装的，会在导出完成后尝试移除。
+3. 优先检测已有 Hysteria2 独立服务端配置。
+4. 如果没有 Hysteria2 配置，再检测已有 sing-box 配置中的 `hysteria2` / `hy2` inbound。
+5. 如果检测到已有 hy2，会直接生成导入数据，不安装新的 Hysteria2。
+6. 如果没有任何 hy2，才从 Hysteria GitHub Release 下载二进制，自动生成自签 TLS 证书、随机密码和 Hysteria2 服务端配置。
+7. 启动或重启 Hysteria2 服务。
+8. 输出原机器可粘贴导入的 `QIE_NODE_BEGIN` 数据块。这个数据块里是原机器 sing-box 使用的 hysteria2 outbound 配置。
+9. 清理本脚本的临时文件；在 Alpine 上，如果 `curl`、`python3`、`openssl` 是本脚本临时安装的，会在导出完成后尝试移除。
 
 Hysteria2 二进制、服务文件、配置和证书是落地机运行所必需的，不会删除。
 
@@ -92,6 +93,14 @@ sudo qie add
 - `/etc/hysteria/*.yml`
 
 如果都不存在，会创建 `/etc/hysteria/config.yaml`。
+
+同时也会检测以下 sing-box 配置路径中的 `hysteria2` / `hy2` inbound：
+
+- `/etc/s-box/sb.json`
+- `/etc/sing-box/config.json`
+- `/usr/local/etc/sing-box/config.json`
+- `/etc/s-box/*.json`
+- `/etc/sing-box/*.json`
 
 如果想手动指定落地机上的 Hysteria2 服务端配置路径：
 
