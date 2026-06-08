@@ -237,13 +237,13 @@ sudo qie test
 更新 `qie`：
 
 ```bash
-tmp=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie -o "$tmp" && sudo install -m 755 "$tmp" /usr/local/bin/qie && rm -f "$tmp"
+tmp=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie -o "$tmp" && if [ -f /usr/local/bin/qie ] && cmp -s "$tmp" /usr/local/bin/qie; then echo "qie 已是最新"; rm -f "$tmp"; else sudo install -m 755 "$tmp" /usr/local/bin/qie && rm -f "$tmp" && echo "qie 已更新"; fi
 ```
 
 Alpine：
 
 ```sh
-tmp=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie -o "$tmp" && install -m 755 "$tmp" /usr/local/bin/qie && rm -f "$tmp"
+tmp=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie -o "$tmp" && if [ -f /usr/local/bin/qie ] && cmp -s "$tmp" /usr/local/bin/qie; then echo "qie 已是最新"; rm -f "$tmp"; else install -m 755 "$tmp" /usr/local/bin/qie && rm -f "$tmp" && echo "qie 已更新"; fi
 ```
 
 ## 卸载
