@@ -469,9 +469,9 @@ install_bbr() {
 
   echo "正在运行 BBR 工具..." >&2
   if [ -r /dev/tty ]; then
-    bash -c 'set -e; bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/install-alias.sh?$(date +%s)"); [ -f ~/.bashrc ] && source ~/.bashrc || true; command -v bbr >/dev/null 2>&1 && bbr || { echo "安装后未找到 bbr 命令" >&2; exit 1; }' </dev/tty
+    bash -c 'set -e; bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/install-alias.sh?$(date +%s)"); bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/net-tcp-tune.sh?$(date +%s)")' </dev/tty
   else
-    bash -c 'set -e; bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/install-alias.sh?$(date +%s)"); [ -f ~/.bashrc ] && source ~/.bashrc || true; command -v bbr >/dev/null 2>&1 && bbr || { echo "安装后未找到 bbr 命令" >&2; exit 1; }'
+    bash -c 'set -e; bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/install-alias.sh?$(date +%s)"); bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/net-tcp-tune.sh?$(date +%s)")'
   fi
 }
 
