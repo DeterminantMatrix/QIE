@@ -111,6 +111,8 @@ QIE_NODE_END
 
 导出数据会写入 `test_protocol`。Hysteria2 / TUIC 这类 UDP 协议会按 UDP 节点处理，避免在 `qie` 菜单中被错误显示为 TCP 超时。
 
+如果落地机已经安装了第三方 Hysteria2，`luodi` 会从现有配置或证书中提取端口、密码和 SNI。比如 Alpine 脚本安装的 hy2 使用 `www.bing.com` 作为证书域名时，导出的 sing-box 客户端配置会写入 `tls.server_name: www.bing.com`，不会再使用默认的 `qie.local`。
+
 复制整段输出，回到原机器执行：
 
 ```bash

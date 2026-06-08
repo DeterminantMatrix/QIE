@@ -317,7 +317,9 @@ detect_existing_hy2() {
 import json
 import os
 import re
+import ssl
 import sys
+from urllib.parse import urlparse
 
 out = sys.argv[1]
 
@@ -334,6 +336,64 @@ def find_scalar(text, key_name):
     m = re.search(rf'(?m)^\s*{re.escape(key_name)}\s*:\s*["\']?([^"\'\n#]+)', text)
     return m.group(1).strip() if m else None
 
+def clean_scalar(value):
+    if value is None:
+        return None
+    value = str(value).strip().strip('"').strip("'")
+    return value or None
+
+def resolve_path(base, value):
+    value = clean_scalar(value)
+    if not value:
+        return None
+    if os.path.isabs(value):
+        return value
+    return os.path.abspath(os.path.join(os.path.dirname(base), value))
+
+def cert_name(path):
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        cert = ssl._ssl._test_decode_cert(path)
+    except Exception:
+        return None
+
+    for item in cert.get('subjectAltName', ()):
+        if len(item) == 2 and item[0].lower() == 'dns' and item[1]:
+            return item[1]
+
+    for rdn in cert.get('subject', ()):
+        for key, value in rdn:
+            if key == 'commonName' and value:
+                return value
+
+    return None
+
+def detect_hysteria_sni(path, text):
+    for key in ('sni', 'serverName', 'servername', 'server_name'):
+        value = clean_scalar(find_scalar(text, key))
+        if value:
+            return value
+
+    cert_path = resolve_path(path, find_scalar(text, 'cert'))
+    name = cert_name(cert_path)
+    if name:
+        return name
+
+    domains = re.search(r'(?ms)^\s*domains\s*:\s*\n((?:\s*-\s*[^\n#]+\n?)+)', text)
+    if domains:
+        m = re.search(r'^\s*-\s*["\']?([^"\'\n#]+)', domains.group(1), re.M)
+        if m:
+            return clean_scalar(m.group(1))
+
+    url = clean_scalar(find_scalar(text, 'url'))
+    if url:
+        parsed = urlparse(url)
+        if parsed.hostname:
+            return parsed.hostname
+
+    return ''
+
 def parse_hysteria_config(path):
     text = read_text(path)
     if not text.strip():
@@ -345,7 +405,13 @@ def parse_hysteria_config(path):
     m = re.search(r':(\d+)$', listen)
     if not m:
         return None
-    return {'kind': 'hysteria', 'path': path, 'port': int(m.group(1)), 'password': password}
+    return {
+        'kind': 'hysteria',
+        'path': path,
+        'port': int(m.group(1)),
+        'password': password,
+        'sni': detect_hysteria_sni(path, text),
+    }
 
 def split_host_port(server_value):
     if not isinstance(server_value, str):
@@ -388,8 +454,15 @@ def parse_singbox_config(path):
                 if isinstance(user, dict) and user.get('password'):
                     password = user['password']
                     break
+        sni = ''
+        tls = inbound.get('tls')
+        if isinstance(tls, dict):
+            for key in ('server_name', 'serverName', 'sni'):
+                if tls.get(key):
+                    sni = str(tls[key]).strip()
+                    break
         if port and password:
-            return {'kind': 'sing-box', 'path': path, 'port': port, 'password': password}
+            return {'kind': 'sing-box', 'path': path, 'port': port, 'password': password, 'sni': sni}
     return None
 
 hysteria_paths = ['/etc/hysteria/config.yaml', '/etc/hysteria/config.yml']
@@ -429,7 +502,7 @@ for path in singbox_paths:
         write(parsed)
         raise SystemExit(0)
 
-write({'kind': '', 'path': '', 'port': '', 'password': ''})
+write({'kind': '', 'path': '', 'port': '', 'password': '', 'sni': ''})
 raise SystemExit(2)
 PY
 }
@@ -479,8 +552,10 @@ emit_export() {
   source_path="$1"
   port="$2"
   password="$3"
-  out="$4"
-  python3 - "$SERVER" "$SNI" "$NAME" "$source_path" "$port" "$password" "$out" <<'PY'
+  sni="$4"
+  out="$5"
+  [ -n "$sni" ] || sni="$SNI"
+  python3 - "$SERVER" "$sni" "$NAME" "$source_path" "$port" "$password" "$out" <<'PY'
 import base64
 import json
 import socket
@@ -525,6 +600,7 @@ payload = {
     'exported_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
     'server': server,
     'server_port': port,
+    'sni': sni,
     'protocol': 'hysteria2',
     'test_protocol': 'udp',
     'config': client_config,
@@ -702,6 +778,12 @@ echo " QIE 落地机检测"
 echo "========================"
 if [ "$HY2_EXISTS" -eq 1 ]; then
   echo "hy2: 有 ($(json_field "$DETECT_TMP" kind), $(json_field "$DETECT_TMP" path), 端口 $(json_field "$DETECT_TMP" port))"
+  DETECTED_SNI="$(json_field "$DETECT_TMP" sni)"
+  if [ -n "$DETECTED_SNI" ]; then
+    echo "SNI: $DETECTED_SNI"
+  else
+    echo "SNI: $SNI (未从配置识别，使用默认/参数)"
+  fi
 else
   echo "hy2: 无"
 fi
@@ -744,6 +826,7 @@ if ask_yes_no "现在导出 QIE 导入数据" "y"; then
     "$(json_field "$DETECT_TMP" path)" \
     "$(json_field "$DETECT_TMP" port)" \
     "$(json_field "$DETECT_TMP" password)" \
+    "$(json_field "$DETECT_TMP" sni)" \
     "$EXPORT_TMP"
   cat "$EXPORT_TMP"
 else
