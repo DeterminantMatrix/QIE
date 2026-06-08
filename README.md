@@ -201,6 +201,13 @@ sudo qie rename 1 新名称
 sudo qie rename my-node 新名称
 ```
 
+删除落地机：
+
+```bash
+sudo qie delete 1
+sudo qie delete my-node
+```
+
 查看节点：
 
 ```bash

@@ -717,6 +717,64 @@ def rename_node(key=None, new_name=None):
     print(f"已重命名: {node['id']} -> {new_name}")
 
 
+def delete_node(key=None):
+    nodes = load_index()
+    if not nodes:
+        print('暂无落地机配置')
+        return
+
+    if not key:
+        print_nodes()
+        try:
+            key = input('输入要删除的节点编号或名称: ').strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            die('已取消')
+
+    node = None
+    if key.isdigit():
+        idx = int(key) - 1
+        if 0 <= idx < len(nodes):
+            node = nodes[idx]
+
+    if not node:
+        node = find_node(key)
+
+    if not node:
+        die('错误: 未找到节点 - ' + key)
+
+    try:
+        answer = input(f"确认删除 {node_label(node)} ? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        die('已取消')
+
+    if answer not in ('y', 'yes'):
+        print('已取消删除。')
+        return
+
+    was_current = get_state() == node['id']
+    nodes = [item for item in nodes if item['id'] != node['id']]
+    save_index(nodes)
+
+    config_path = node.get('config')
+    if config_path:
+        try:
+            if os.path.isfile(config_path):
+                os.remove(config_path)
+        except OSError as e:
+            print('提示: 删除配置文件失败 - ' + str(e))
+
+    if was_current:
+        try:
+            os.remove(STATE)
+        except FileNotFoundError:
+            pass
+
+    cleanup_qie_residue()
+    print('已删除落地机: ' + node.get('name', node['id']))
+
+
 def print_test():
     nodes = load_index()
     if not nodes:
@@ -780,6 +838,7 @@ def print_menu():
 
     print(' a. 录入落地机')
     print(' r. 重命名落地机')
+    print(' x. 删除落地机')
     print(' d. 直连')
     print(' s. 状态')
     print(' t. 测速')
@@ -801,6 +860,8 @@ def print_menu():
         import_node()
     elif ch in ('r', 'rename'):
         rename_node()
+    elif ch in ('x', 'delete', 'del', 'remove', 'rm'):
+        delete_node()
     elif ch in ('d', 'direct', 'dir'):
         switch_direct()
     elif ch in ('s', 'st', 'status'):
@@ -817,6 +878,7 @@ def usage():
     print('  qie add|import')
     print('  qie list')
     print('  qie rename <节点编号或名称> <新名称>')
+    print('  qie delete <节点编号或名称>')
     print('  qie <节点编号或名称>')
     print('  qie direct')
     print('  qie status')
@@ -845,6 +907,9 @@ def main():
         key = sys.argv[2].strip() if len(sys.argv) > 2 else None
         new_name = ' '.join(sys.argv[3:]).strip() if len(sys.argv) > 3 else None
         rename_node(key, new_name)
+    elif low in ('delete', 'del', 'remove', 'rm', 'x'):
+        key = sys.argv[2].strip() if len(sys.argv) > 2 else None
+        delete_node(key)
     elif low in ('direct', 'dir', 'd'):
         switch_direct()
     elif low in ('status', 'st', 's'):
