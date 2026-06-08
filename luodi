@@ -585,6 +585,7 @@ client_config = {
                 'enabled': True,
                 'server_name': sni,
                 'insecure': True,
+                'alpn': ['h3'],
             },
         },
         {'type': 'direct', 'tag': 'direct'},
