@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 CONFIG="/etc/s-box/sb.json"
 NAME=""
@@ -67,7 +67,7 @@ import time
 config_path = sys.argv[1]
 name = sys.argv[2]
 
-with open(config_path, 'r', encoding='utf-8') as f:
+with open(config_path, 'r', encoding='utf-8-sig') as f:
     config = json.load(f)
 
 payload = {

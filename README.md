@@ -17,6 +17,12 @@ Debian / Ubuntu：
 sudo apt update && sudo apt install -y curl python3 && tmp=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie -o "$tmp" && sudo install -m 755 "$tmp" /usr/local/bin/qie && rm -f "$tmp"
 ```
 
+Alpine：
+
+```sh
+apk add --no-cache curl python3 && tmp=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie -o "$tmp" && install -m 755 "$tmp" /usr/local/bin/qie && rm -f "$tmp"
+```
+
 安装后首次运行：
 
 ```bash
@@ -29,8 +35,16 @@ sudo qie
 
 在落地机 SSH 中执行：
 
+Debian / Ubuntu：
+
 ```bash
-sudo apt update && sudo apt install -y curl python3 && curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie-export-node | sudo bash -s -- -n my-node
+sudo apt update && sudo apt install -y curl python3 && curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie-export-node | sudo sh -s -- -n my-node
+```
+
+Alpine：
+
+```sh
+apk add --no-cache curl python3 && curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie-export-node | sh -s -- -n my-node
 ```
 
 把 `my-node` 换成你想显示在 `qie` 菜单里的名称。
@@ -53,14 +67,22 @@ sudo qie add
 
 如果落地机的 sing-box 配置不是 `/etc/s-box/sb.json`，可以指定路径：
 
+Debian / Ubuntu：
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie-export-node | sudo bash -s -- -n my-node -c /path/to/sb.json
+curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie-export-node | sudo sh -s -- -n my-node -c /path/to/sb.json
+```
+
+Alpine：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie-export-node | sh -s -- -n my-node -c /path/to/sb.json
 ```
 
 ## 前置条件
 
 - 原机器和落地机都需要 `python3`
-- 原机器使用 `systemd`
+- 原机器使用 `systemd` 或 OpenRC
 - 原机器已安装 `sing-box`
 - 原机器 sing-box 服务名为 `sing-box`
 - `qie` 需要 root 权限运行
@@ -128,6 +150,12 @@ sudo qie test
 
 ```bash
 tmp=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie -o "$tmp" && sudo install -m 755 "$tmp" /usr/local/bin/qie && rm -f "$tmp"
+```
+
+Alpine：
+
+```sh
+tmp=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie -o "$tmp" && install -m 755 "$tmp" /usr/local/bin/qie && rm -f "$tmp"
 ```
 
 ## 卸载

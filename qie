@@ -42,7 +42,7 @@ def die(msg):
 
 
 def load_json(path):
-    with open(path, 'r', encoding='utf-8') as f:
+    with open(path, 'r', encoding='utf-8-sig') as f:
         return json.load(f)
 
 
@@ -405,34 +405,75 @@ def ensure_direct_config():
 
 
 def restart_sb():
-    subprocess.run(
-        ['systemctl', 'restart', 'sing-box'],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    if shutil.which('systemctl'):
+        subprocess.run(
+            ['systemctl', 'restart', 'sing-box'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    elif shutil.which('rc-service'):
+        subprocess.run(
+            ['rc-service', 'sing-box', 'restart'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    elif shutil.which('service'):
+        subprocess.run(
+            ['service', 'sing-box', 'restart'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        print('错误: 未找到 systemctl、rc-service 或 service，无法重启 sing-box')
+        return False
 
     for _ in range(6):
         time.sleep(0.5)
-        r = subprocess.run(
-            ['systemctl', 'is-active', 'sing-box'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        if r.stdout.strip() == 'active':
+        if service_status() in ('active', 'started', 'running'):
             return True
 
     return False
 
 
 def service_status():
-    r = subprocess.run(
-        ['systemctl', 'is-active', 'sing-box'],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-    )
-    return r.stdout.strip()
+    if shutil.which('systemctl'):
+        r = subprocess.run(
+            ['systemctl', 'is-active', 'sing-box'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return r.stdout.strip()
+
+    if shutil.which('rc-service'):
+        r = subprocess.run(
+            ['rc-service', 'sing-box', 'status'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        out = r.stdout.strip().lower()
+        if 'started' in out or 'running' in out:
+            return 'started'
+        if 'stopped' in out:
+            return 'stopped'
+        return out or 'unknown'
+
+    if shutil.which('service'):
+        r = subprocess.run(
+            ['service', 'sing-box', 'status'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        out = r.stdout.strip().lower()
+        if 'running' in out or 'started' in out:
+            return 'running'
+        if 'stopped' in out:
+            return 'stopped'
+        return out or 'unknown'
+
+    return 'unknown'
 
 
 def switch_to_path(state, label, src):
@@ -468,7 +509,7 @@ def switch_to_path(state, label, src):
             print('已回滚到原配置')
         else:
             print('严重错误: 回滚后 sing-box 仍未启动')
-            print('建议执行: systemctl status sing-box --no-pager -l')
+            print('建议检查 sing-box 服务状态')
     else:
         try:
             os.remove(CRUN)
