@@ -1,52 +1,25 @@
 #!/usr/bin/env python3
-import os
-import sys
-import json
-import time
-import socket
+import base64
+import binascii
 import errno
+import json
+import os
+import re
 import shutil
+import socket
 import subprocess
+import sys
+import time
 
 CDIR = '/etc/s-box'
 CRUN = CDIR + '/sb.json'
-STATE = CDIR + '/qie_mode'
-OLD_STATE = '/tmp/qie_mode'
+STATE = CDIR + '/qie_state'
+NODES_DIR = CDIR + '/qie_nodes'
+INDEX = CDIR + '/qie_nodes.json'
 CDIRECT = CDIR + '/sb_direct.json'
 
-NODES = {
-    'SG': {
-        'config': CDIR + '/sb_sg.json',
-        'name': 'SG',
-        'host': '43.252.21.20',
-        'port': 8443,
-    },
-    'TW': {
-        'config': CDIR + '/sb_taiwan.json',
-        'name': 'TW',
-        'host': '78.105.182.146',
-        'port': 29031,
-    },
-    'JP': {
-        'config': CDIR + '/sb_jp.json',
-        'name': 'JP',
-        'host': '167.254.242.31',
-        'port': 18443,
-    },
-    'DIRECT': {
-        'config': CDIRECT,
-        'name': 'Direct',
-        'host': None,
-        'port': None,
-    },
-}
-
-MENU = {
-    '1': 'SG',
-    '2': 'TW',
-    '3': 'JP',
-    '4': 'DIRECT',
-}
+BEGIN = 'QIE_NODE_BEGIN'
+END = 'QIE_NODE_END'
 
 REMOTE_TYPES = {
     'hysteria',
@@ -69,22 +42,30 @@ def die(msg):
 
 
 def load_json(path):
-    with open(path, 'r') as f:
+    with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
 
 def save_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + '.tmp'
-    with open(tmp, 'w') as f:
+    with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.write('\n')
     os.replace(tmp, path)
 
 
 def atomic_copy(src, dst):
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
     tmp = dst + '.tmp'
     shutil.copy2(src, tmp)
     os.replace(tmp, dst)
+
+
+def slugify(name):
+    s = re.sub(r'[^A-Za-z0-9._-]+', '-', name.strip())
+    s = s.strip('.-_').lower()
+    return s or 'node'
 
 
 def find_singbox():
@@ -109,7 +90,7 @@ def validate_json(path):
         load_json(path)
         return True
     except Exception as e:
-        print(f'JSON 校验失败: {path} — {e}')
+        print(f'JSON 校验失败: {path} - {e}')
         return False
 
 
@@ -126,7 +107,7 @@ def validate_config(path):
         [sb, 'check', '-c', path],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True
+        text=True,
     )
 
     if r.returncode != 0:
@@ -139,127 +120,75 @@ def validate_config(path):
     return True
 
 
-def has_direct_outbound(data):
-    outs = data.get('outbounds', [])
-    if not isinstance(outs, list):
-        return False
-
-    return any(
-        isinstance(o, dict) and o.get('tag') == 'direct'
-        for o in outs
-    )
-
-
-def make_direct(data):
-    if 'outbounds' not in data or not isinstance(data['outbounds'], list):
-        data['outbounds'] = []
-
-    if not has_direct_outbound(data):
-        data['outbounds'].append({
-            'type': 'direct',
-            'tag': 'direct',
-        })
-
-    if 'route' not in data or not isinstance(data['route'], dict):
-        data['route'] = {}
-
-    data['route']['rules'] = []
-    data['route']['final'] = 'direct'
-
-    return data
-
-
-def is_clean_direct_config(path):
-    try:
-        data = load_json(path)
-    except Exception:
-        return False
-
-    route = data.get('route', {})
-    if not isinstance(route, dict):
-        return False
-
-    if route.get('final') != 'direct':
-        return False
-
-    if route.get('rules', []) != []:
-        return False
-
-    if not has_direct_outbound(data):
-        return False
-
-    return True
-
-
-def ensure_direct_config():
-    if os.path.exists(CDIRECT):
-        if not validate_json(CDIRECT):
-            die('错误: sb_direct.json 已存在但 JSON 不合法，请先手动修复')
-
-        if is_clean_direct_config(CDIRECT):
-            return
-
-        old = CDIRECT + '.bak'
-        shutil.copy2(CDIRECT, old)
-
-        data = make_direct(load_json(CDIRECT))
-        save_json(CDIRECT, data)
-
-        if not validate_config(CDIRECT):
-            atomic_copy(old, CDIRECT)
-            die('错误: 修复 sb_direct.json 后校验失败，已回滚')
-
-        print('已修复 Direct 配置: ' + CDIRECT)
-        return
-
-    if not os.path.exists(CRUN):
-        die('错误: 当前运行配置不存在，无法创建 Direct 配置')
-
-    if not validate_json(CRUN):
-        die('错误: 当前运行配置 JSON 不合法，无法创建 Direct 配置')
-
-    data = make_direct(load_json(CRUN))
-    save_json(CDIRECT, data)
-
-    if not validate_config(CDIRECT):
-        os.remove(CDIRECT)
-        die('错误: 自动创建的 Direct 配置不合法，已删除')
-
-    print('已创建 Direct 配置: ' + CDIRECT)
-
-
-def migrate_state():
-    if os.path.exists(STATE):
-        return
-
-    if not os.path.exists(OLD_STATE):
-        return
+def load_index():
+    if not os.path.exists(INDEX):
+        return []
 
     try:
-        mode = open(OLD_STATE).read().strip().upper()
+        data = load_json(INDEX)
     except Exception:
-        return
+        return []
 
-    if mode in NODES:
-        save_state(mode)
-        print(f'已迁移旧状态: {OLD_STATE} -> {STATE}')
+    nodes = data.get('nodes', data if isinstance(data, list) else [])
+    if not isinstance(nodes, list):
+        return []
+
+    clean = []
+    for node in nodes:
+        if isinstance(node, dict) and node.get('id') and node.get('config'):
+            clean.append(node)
+    return clean
+
+
+def save_index(nodes):
+    save_json(INDEX, {'nodes': nodes})
+
+
+def get_node(node_id):
+    for node in load_index():
+        if node['id'] == node_id:
+            return node
+    return None
+
+
+def find_node(key):
+    key = key.strip().lower()
+    nodes = load_index()
+    matches = []
+    for node in nodes:
+        if node['id'].lower() == key or node.get('name', '').lower() == key:
+            return node
+        if node['id'].lower().startswith(key) or node.get('name', '').lower().startswith(key):
+            matches.append(node)
+
+    if len(matches) == 1:
+        return matches[0]
+
+    return None
 
 
 def get_state():
-    migrate_state()
+    if not os.path.exists(STATE):
+        return None
 
-    if os.path.exists(STATE):
-        mode = open(STATE).read().strip().upper()
-        if mode in NODES:
-            return mode
+    try:
+        state = open(STATE, encoding='utf-8').read().strip()
+    except Exception:
+        return None
 
-    return 'DIRECT'
+    if state == 'DIRECT':
+        return state
+
+    if get_node(state):
+        return state
+
+    return None
 
 
-def save_state(mode):
+def save_state(state):
     os.makedirs(CDIR, exist_ok=True)
-    with open(STATE, 'w') as f:
-        f.write(mode)
+    with open(STATE, 'w', encoding='utf-8', newline='\n') as f:
+        f.write(state)
 
 
 def split_host_port(server):
@@ -267,7 +196,6 @@ def split_host_port(server):
         return None, None
 
     s = server.strip()
-
     if s.startswith('[') and ']' in s:
         host = s[1:s.index(']')]
         rest = s[s.index(']') + 1:]
@@ -303,7 +231,6 @@ def endpoint_from_outbound(outbound):
         return None
 
     host, embedded_port = split_host_port(server)
-
     if port is None:
         port = embedded_port
 
@@ -323,12 +250,7 @@ def endpoint_from_outbound(outbound):
     }
 
 
-def detect_endpoint_from_config(path):
-    try:
-        data = load_json(path)
-    except Exception:
-        return None
-
+def detect_endpoint_from_data(data):
     outs = data.get('outbounds', [])
     if not isinstance(outs, list):
         return None
@@ -339,7 +261,6 @@ def detect_endpoint_from_config(path):
             by_tag[o['tag']] = o
 
     preferred = []
-
     route = data.get('route', {})
     if isinstance(route, dict):
         final = route.get('final')
@@ -358,7 +279,6 @@ def detect_endpoint_from_config(path):
     for o in preferred:
         if not isinstance(o, dict):
             continue
-
         key = id(o)
         if key in seen:
             continue
@@ -371,37 +291,29 @@ def detect_endpoint_from_config(path):
     return None
 
 
-def get_node_endpoint(mode):
-    node = NODES[mode]
-    path = node['config']
-
-    if os.path.exists(path):
-        ep = detect_endpoint_from_config(path)
-        if ep:
-            return ep
-
-    if node['host'] and node['port']:
-        return {
-            'host': node['host'],
-            'port': node['port'],
-            'type': 'manual',
-            'tag': '',
-        }
-
-    return None
+def detect_endpoint_from_config(path):
+    try:
+        return detect_endpoint_from_data(load_json(path))
+    except Exception:
+        return None
 
 
-def node_label(mode):
-    n = NODES[mode]
+def endpoint_text(endpoint):
+    if not endpoint:
+        return '未识别'
 
-    if mode == 'DIRECT':
-        return n['name']
+    suffix = endpoint.get('type', '')
+    if endpoint.get('tag'):
+        suffix += '/' + endpoint['tag']
 
-    ep = get_node_endpoint(mode)
+    return f"{endpoint['host']}:{endpoint['port']} [{suffix}]"
+
+
+def node_label(node):
+    ep = node.get('endpoint') or detect_endpoint_from_config(node['config'])
     if ep:
-        return f"{n['name']} ({ep['host']}:{ep['port']})"
-
-    return n['name']
+        return f"{node.get('name', node['id'])} ({ep['host']}:{ep['port']})"
+    return node.get('name', node['id'])
 
 
 def tcp_latency(host, port, timeout=2.0, samples=3):
@@ -415,10 +327,8 @@ def tcp_latency(host, port, timeout=2.0, samples=3):
         try:
             err = s.connect_ex((host, port))
             cost = (time.monotonic() - start) * 1000
-
             if err == 0:
                 times.append(cost)
-
         except OSError as e:
             if e.errno not in (
                 errno.EHOSTUNREACH,
@@ -442,62 +352,73 @@ def fmt_latency(v):
     return f'TCP: {v:.0f}ms'
 
 
-def test_nodes():
-    out = {}
+def has_direct_outbound(data):
+    outs = data.get('outbounds', [])
+    if not isinstance(outs, list):
+        return False
 
-    for mode in ('SG', 'TW', 'JP'):
-        ep = get_node_endpoint(mode)
-
-        if not ep:
-            out[mode] = None
-            continue
-
-        out[mode] = tcp_latency(ep['host'], ep['port'])
-
-    return out
+    return any(
+        isinstance(o, dict) and o.get('tag') == 'direct'
+        for o in outs
+    )
 
 
-def endpoint_text(mode):
-    ep = get_node_endpoint(mode)
-    if not ep:
-        return '未识别'
+def make_direct(data):
+    if 'outbounds' not in data or not isinstance(data['outbounds'], list):
+        data['outbounds'] = []
 
-    suffix = ep['type']
-    if ep['tag']:
-        suffix += '/' + ep['tag']
+    if not has_direct_outbound(data):
+        data['outbounds'].append({
+            'type': 'direct',
+            'tag': 'direct',
+        })
 
-    return f"{ep['host']}:{ep['port']} [{suffix}]"
+    if 'route' not in data or not isinstance(data['route'], dict):
+        data['route'] = {}
+
+    data['route']['rules'] = []
+    data['route']['final'] = 'direct'
+
+    return data
 
 
-def print_test():
-    results = test_nodes()
+def ensure_direct_config():
+    if os.path.exists(CDIRECT):
+        if not validate_config(CDIRECT):
+            die('错误: sb_direct.json 已存在但不合法，请手动修复')
+        return
 
-    print('========================')
-    print(' 节点 TCP 测速')
-    print('========================')
+    if not os.path.exists(CRUN):
+        die('错误: 当前没有运行配置，无法生成 Direct 配置')
 
-    for mode in ('SG', 'TW', 'JP'):
-        missing = '' if os.path.exists(NODES[mode]['config']) else '  缺配置'
-        print(f" {mode:<2} {endpoint_text(mode):<36} {fmt_latency(results[mode])}{missing}")
+    if not validate_json(CRUN):
+        die('错误: 当前运行配置 JSON 不合法，无法生成 Direct 配置')
+
+    data = make_direct(load_json(CRUN))
+    save_json(CDIRECT, data)
+
+    if not validate_config(CDIRECT):
+        os.remove(CDIRECT)
+        die('错误: 自动创建的 Direct 配置不合法，已删除')
+
+    print('已创建 Direct 配置: ' + CDIRECT)
 
 
 def restart_sb():
     subprocess.run(
         ['systemctl', 'restart', 'sing-box'],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
+        stderr=subprocess.DEVNULL,
     )
 
     for _ in range(6):
         time.sleep(0.5)
-
         r = subprocess.run(
             ['systemctl', 'is-active', 'sing-box'],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True
+            text=True,
         )
-
         if r.stdout.strip() == 'active':
             return True
 
@@ -509,88 +430,215 @@ def service_status():
         ['systemctl', 'is-active', 'sing-box'],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
-        text=True
+        text=True,
     )
     return r.stdout.strip()
 
 
-def switch(mode):
-    if mode == 'DIRECT':
-        ensure_direct_config()
-
-    src = NODES[mode]['config']
-
+def switch_to_path(state, label, src):
     if not os.path.exists(src):
-        die('错误: 配置文件不存在 — ' + src)
+        die('错误: 配置文件不存在 - ' + src)
 
     if not validate_config(src):
         die('错误: 目标配置不合法，放弃切换')
 
-    if not os.path.exists(CRUN):
-        die('错误: 当前运行配置不存在 — ' + CRUN)
+    rollback = None
+    if os.path.exists(CRUN):
+        if not validate_json(CRUN):
+            die('错误: 当前运行配置 JSON 不合法，放弃切换')
+        rollback = CRUN + '.rollback'
+        shutil.copy2(CRUN, rollback)
 
-    if not validate_json(CRUN):
-        die('错误: 当前运行配置 JSON 不合法，放弃切换')
-
-    old_mode = get_state()
-    rollback = CRUN + '.rollback'
-
-    shutil.copy2(CRUN, rollback)
-
-    print('切换至 ' + node_label(mode) + ' ...', end=' ', flush=True)
-
+    print('切换至 ' + label + ' ...', end=' ', flush=True)
     atomic_copy(src, CRUN)
 
     if restart_sb():
-        save_state(mode)
+        save_state(state)
         print('OK')
-        os.remove(rollback)
+        if rollback and os.path.exists(rollback):
+            os.remove(rollback)
         return
 
     print('失败，回滚中...')
 
-    atomic_copy(rollback, CRUN)
-    save_state(old_mode)
-
-    if restart_sb():
-        print('已回滚到原配置')
+    if rollback and os.path.exists(rollback):
+        atomic_copy(rollback, CRUN)
+        os.remove(rollback)
+        if restart_sb():
+            print('已回滚到原配置')
+        else:
+            print('严重错误: 回滚后 sing-box 仍未启动')
+            print('建议执行: systemctl status sing-box --no-pager -l')
     else:
-        print('严重错误: 回滚后 sing-box 仍未启动')
-        print('建议执行: systemctl status sing-box --no-pager -l')
+        try:
+            os.remove(CRUN)
+        except FileNotFoundError:
+            pass
+        print('没有可回滚的原配置，已移除失败配置')
 
-    os.remove(rollback)
     sys.exit(1)
 
 
-def auto_switch():
-    results = test_nodes()
-    usable = {}
+def switch_node(node):
+    switch_to_path(node['id'], node_label(node), node['config'])
 
-    for mode in ('SG', 'TW', 'JP'):
-        if not os.path.exists(NODES[mode]['config']):
+
+def switch_direct():
+    ensure_direct_config()
+    switch_to_path('DIRECT', 'Direct', CDIRECT)
+
+
+def read_import_block():
+    print('请粘贴落地机生成的数据块，以 QIE_NODE_BEGIN 开头，以 QIE_NODE_END 结尾。')
+    print('粘贴完成后回车；检测到结束标记会自动导入。')
+
+    lines = []
+    started = False
+
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        except KeyboardInterrupt:
+            print()
+            die('已取消')
+
+        text = line.strip()
+        if text == BEGIN:
+            started = True
+            lines = []
             continue
 
-        if results[mode] is None:
-            continue
+        if text == END:
+            if not started:
+                die('错误: 未找到开始标记')
+            return ''.join(lines)
 
-        usable[mode] = results[mode]
+        if started:
+            lines.append(text)
 
-    if not usable:
-        die('错误: 没有可用节点，无法 auto')
+    die('错误: 未读取到完整的数据块')
 
-    best = min(usable, key=usable.get)
 
-    print('Auto 选择: ' + best + ' ' + fmt_latency(results[best]))
-    switch(best)
+def decode_import_payload(encoded):
+    try:
+        raw = base64.b64decode(encoded.encode('ascii'), validate=True)
+        data = json.loads(raw.decode('utf-8'))
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as e:
+        die('错误: 导入数据无法解析 - ' + str(e))
+
+    if not isinstance(data, dict):
+        die('错误: 导入数据格式不正确')
+
+    if data.get('format') != 'qie-node' or int(data.get('version', 0)) != 1:
+        die('错误: 不支持的导入数据格式')
+
+    config = data.get('config')
+    if not isinstance(config, dict):
+        die('错误: 导入数据缺少 sing-box 配置')
+
+    name = str(data.get('name') or '').strip()
+    if not name:
+        name = 'node'
+
+    return name, config
+
+
+def unique_node_id(base, nodes):
+    existing = {node['id'] for node in nodes}
+    node_id = slugify(base)
+    if node_id not in existing:
+        return node_id
+
+    i = 2
+    while f'{node_id}-{i}' in existing:
+        i += 1
+    return f'{node_id}-{i}'
+
+
+def import_node():
+    encoded = read_import_block()
+    name, config = decode_import_payload(encoded)
+
+    nodes = load_index()
+    node_id = unique_node_id(name, nodes)
+    config_path = os.path.join(NODES_DIR, node_id + '.json')
+
+    save_json(config_path, config)
+    if not validate_config(config_path):
+        os.remove(config_path)
+        die('错误: 导入配置未通过校验，已放弃')
+
+    endpoint = detect_endpoint_from_data(config)
+    node = {
+        'id': node_id,
+        'name': name,
+        'config': config_path,
+        'endpoint': endpoint,
+        'created_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
+    }
+    nodes.append(node)
+    save_index(nodes)
+
+    print('已导入落地机: ' + node_label(node))
+    print('配置文件: ' + config_path)
+
+
+def ensure_has_nodes_or_import():
+    if load_index():
+        return
+
+    print('当前没有任何落地机配置。')
+    print('请先在落地机 SSH 中执行 README 的导出命令，复制生成的数据块。')
+    import_node()
+
+
+def print_nodes():
+    nodes = load_index()
+    if not nodes:
+        print('暂无落地机配置')
+        return
+
+    cur = get_state()
+    for i, node in enumerate(nodes, 1):
+        mark = '*' if cur == node['id'] else ' '
+        ep = node.get('endpoint') or detect_endpoint_from_config(node['config'])
+        print(f"{mark} {i}. {node['id']}  {node_label(node)}  {endpoint_text(ep)}")
+
+
+def print_test():
+    nodes = load_index()
+    if not nodes:
+        print('暂无落地机配置')
+        return
+
+    print('========================')
+    print(' 节点 TCP 测速')
+    print('========================')
+
+    for node in nodes:
+        ep = node.get('endpoint') or detect_endpoint_from_config(node['config'])
+        latency = None
+        if ep:
+            latency = tcp_latency(ep['host'], ep['port'])
+        print(f" {node['id']:<18} {endpoint_text(ep):<36} {fmt_latency(latency)}")
 
 
 def print_status():
-    mode = get_state()
-
+    cur = get_state()
     print('========================')
     print(' 当前状态')
     print('========================')
-    print('当前模式: ' + node_label(mode))
+
+    if cur == 'DIRECT':
+        print('当前模式: Direct')
+    elif cur:
+        node = get_node(cur)
+        print('当前模式: ' + node_label(node))
+    else:
+        print('当前模式: 未设置')
+
     print('sing-box: ' + service_status())
 
     sb = find_singbox()
@@ -599,26 +647,29 @@ def print_status():
     else:
         print('sing-box bin: 未找到')
 
+    print('节点数量: ' + str(len(load_index())))
+
 
 def print_menu():
+    ensure_has_nodes_or_import()
+    nodes = load_index()
     cur = get_state()
-    results = test_nodes()
 
     print('========================')
-    print(' 当前: ' + node_label(cur))
+    if cur == 'DIRECT':
+        print(' 当前: Direct')
+    elif cur and get_node(cur):
+        print(' 当前: ' + node_label(get_node(cur)))
+    else:
+        print(' 当前: 未设置')
     print(' sing-box: ' + service_status())
     print('========================')
 
-    for idx, mode in [('1', 'SG'), ('2', 'TW'), ('3', 'JP')]:
-        if os.path.exists(NODES[mode]['config']):
-            status = fmt_latency(results[mode])
-        else:
-            status = '缺配置'
+    for i, node in enumerate(nodes, 1):
+        print(f" {i}. {node_label(node)}")
 
-        print(f" {idx}. {mode:<2} {endpoint_text(mode):<36} {status}")
-
-    print(' 4. Direct')
-    print(' 5. Auto')
+    print(' a. 录入落地机')
+    print(' d. Direct')
     print(' s. Status')
     print(' t. Test')
     print(' 0. Exit')
@@ -629,10 +680,16 @@ def print_menu():
     except (EOFError, KeyboardInterrupt):
         ch = '0'
 
-    if ch in MENU:
-        switch(MENU[ch])
-    elif ch == '5':
-        auto_switch()
+    if ch.isdigit() and ch != '0':
+        idx = int(ch) - 1
+        if 0 <= idx < len(nodes):
+            switch_node(nodes[idx])
+            return
+        die('错误: 无效选择')
+    elif ch in ('a', 'add', 'import'):
+        import_node()
+    elif ch in ('d', 'direct', 'dir'):
+        switch_direct()
     elif ch in ('s', 'st', 'status'):
         print_status()
     elif ch in ('t', 'test'):
@@ -644,8 +701,10 @@ def print_menu():
 def usage():
     print('用法:')
     print('  qie')
-    print('  qie sg|tw|jp|direct')
-    print('  qie auto')
+    print('  qie add|import')
+    print('  qie list')
+    print('  qie <节点编号或名称>')
+    print('  qie direct')
     print('  qie status')
     print('  qie test')
 
@@ -655,29 +714,39 @@ def main():
         die('错误: 请用 root 执行')
 
     os.makedirs(CDIR, exist_ok=True)
-    migrate_state()
+    os.makedirs(NODES_DIR, exist_ok=True)
 
     if len(sys.argv) == 1:
         print_menu()
         return
 
-    arg = sys.argv[1].lower()
+    arg = sys.argv[1].strip()
+    low = arg.lower()
 
-    if arg in ('sg', 'tw', 'jp'):
-        switch(arg.upper())
-    elif arg in ('direct', 'dir', 'd'):
-        switch('DIRECT')
-    elif arg in ('auto', 'a'):
-        auto_switch()
-    elif arg in ('status', 'st', 's'):
+    if low in ('add', 'import', 'a'):
+        import_node()
+    elif low in ('list', 'ls'):
+        print_nodes()
+    elif low in ('direct', 'dir', 'd'):
+        switch_direct()
+    elif low in ('status', 'st', 's'):
         print_status()
-    elif arg in ('test', 't'):
+    elif low in ('test', 't'):
         print_test()
-    elif arg in ('help', '-h', '--help'):
+    elif low in ('help', '-h', '--help'):
         usage()
     else:
-        usage()
-        sys.exit(1)
+        node = None
+        if low.isdigit():
+            nodes = load_index()
+            idx = int(low) - 1
+            if 0 <= idx < len(nodes):
+                node = nodes[idx]
+        if not node:
+            node = find_node(arg)
+        if not node:
+            die('错误: 未找到节点 - ' + arg)
+        switch_node(node)
 
 
 if __name__ == '__main__':

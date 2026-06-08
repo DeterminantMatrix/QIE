@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG="/etc/s-box/sb.json"
+NAME=""
+
+usage() {
+  cat <<'EOF'
+Usage:
+  qie-export-node [options]
+
+Options:
+  -n, --name NAME          Node name shown in qie
+  -c, --config FILE        sing-box config path, default: /etc/s-box/sb.json
+  -h, --help               Show this help
+
+Run this command on the landing machine, then copy the output block back to qie.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -n|--name)
+      [ "$#" -ge 2 ] || {
+        echo "Error: $1 requires a value" >&2
+        exit 1
+      }
+      NAME="$2"
+      shift 2
+      ;;
+    -c|--config)
+      [ "$#" -ge 2 ] || {
+        echo "Error: $1 requires a value" >&2
+        exit 1
+      }
+      CONFIG="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Error: unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+command -v python3 >/dev/null 2>&1 || {
+  echo "Error: missing python3" >&2
+  exit 1
+}
+
+if [ -z "$NAME" ]; then
+  NAME="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo node)"
+fi
+
+python3 - "$CONFIG" "$NAME" <<'PY'
+import base64
+import json
+import socket
+import sys
+import time
+
+config_path = sys.argv[1]
+name = sys.argv[2]
+
+with open(config_path, 'r', encoding='utf-8') as f:
+    config = json.load(f)
+
+payload = {
+    'format': 'qie-node',
+    'version': 1,
+    'name': name,
+    'source_host': socket.gethostname(),
+    'source_config': config_path,
+    'exported_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
+    'config': config,
+}
+
+raw = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+encoded = base64.b64encode(raw).decode('ascii')
+
+print('QIE_NODE_BEGIN')
+for i in range(0, len(encoded), 76):
+    print(encoded[i:i + 76])
+print('QIE_NODE_END')
+PY
