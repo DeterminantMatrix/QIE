@@ -5,8 +5,6 @@ NAME=""
 CONFIG="/etc/hysteria/config.yaml"
 PORT="8443"
 PORT_SET=0
-CONNECT_PORT=""
-CONNECT_PORT_SET=0
 SERVER=""
 PASSWORD=""
 SNI="qie.local"
@@ -23,7 +21,6 @@ usage() {
   -n, --name NAME          qie 菜单中显示的节点名称
   -c, --config FILE        Hysteria2 服务端配置路径，默认 /etc/hysteria/config.yaml
   -p, --port PORT          Hysteria2 监听端口，默认 8443
-  --connect-port PORT      原机器连接落地机时使用的公网 UDP 端口，默认等于监听端口
   --server HOST            原机器连接落地机时使用的公网地址/IP
   --password PASSWORD      Hysteria2 密码；不填则自动生成
   --sni NAME               TLS SNI，默认 qie.local
@@ -143,27 +140,11 @@ ask_port_value() {
   done
 }
 
-ask_install_ports() {
+ask_hysteria_port() {
   if [ "$PORT_SET" -eq 0 ]; then
-    PORT="$(ask_port_value "请输入 Hysteria2 本机监听 UDP 端口" "$PORT")"
+    PORT="$(ask_port_value "请输入 Hysteria2 监听 UDP 端口" "$PORT")"
   fi
   validate_port "$PORT" "监听端口"
-
-  if [ "$CONNECT_PORT_SET" -eq 0 ]; then
-    CONNECT_PORT="$(ask_port_value "请输入原机器连接落地机的公网 UDP 端口" "$PORT")"
-  fi
-  validate_port "$CONNECT_PORT" "公网连接端口"
-}
-
-ensure_connect_port() {
-  detected_port="$1"
-  default_port="$detected_port"
-  [ -n "$default_port" ] || default_port="$PORT"
-
-  if [ "$CONNECT_PORT_SET" -eq 0 ]; then
-    CONNECT_PORT="$(ask_port_value "请输入原机器连接落地机的公网 UDP 端口" "$default_port")"
-  fi
-  validate_port "$CONNECT_PORT" "公网连接端口"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -182,16 +163,6 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || die "$1 需要参数值"
       PORT="$2"
       PORT_SET=1
-      if [ "$CONNECT_PORT_SET" -eq 0 ]; then
-        CONNECT_PORT="$PORT"
-        CONNECT_PORT_SET=1
-      fi
-      shift 2
-      ;;
-    --connect-port|--public-port)
-      [ "$#" -ge 2 ] || die "$1 需要参数值"
-      CONNECT_PORT="$2"
-      CONNECT_PORT_SET=1
       shift 2
       ;;
     --server)
@@ -768,6 +739,69 @@ EOF
   die "无法重启 Hysteria2：未找到 systemctl、rc-service 或 service"
 }
 
+restart_hysteria_service() {
+  if [ "$NO_START" -eq 1 ]; then
+    echo "已设置 --no-start，跳过 Hysteria2 重启。" >&2
+    return
+  fi
+
+  if have systemctl; then
+    for svc in hysteria-server hysteria; do
+      if systemctl cat "$svc.service" >/dev/null 2>&1; then
+        systemctl restart "$svc.service"
+        return
+      fi
+    done
+  fi
+
+  if have rc-service; then
+    for svc in hysteria-server hysteria; do
+      if [ -x "/etc/init.d/$svc" ]; then
+        rc-service "$svc" restart
+        return
+      fi
+    done
+  fi
+
+  if have service; then
+    for svc in hysteria-server hysteria; do
+      if service "$svc" status >/dev/null 2>&1; then
+        service "$svc" restart
+        return
+      fi
+    done
+  fi
+
+  warn "未找到可重启的 Hysteria2 服务，请手动重启。"
+}
+
+update_hysteria_port() {
+  config="$1"
+  new_port="$2"
+  validate_port "$new_port" "监听端口"
+  need_root
+
+  python3 - "$config" "$new_port" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+port = sys.argv[2]
+text = path.read_text(encoding='utf-8-sig')
+pattern = re.compile(r'(?m)^(\s*listen\s*:\s*)([^#\n]*?)(\s*#.*)?$')
+
+def repl(match):
+    return f'{match.group(1)}:{port}{match.group(3) or ""}'
+
+new_text, count = pattern.subn(repl, text, count=1)
+if count == 0:
+    new_text = f'listen: :{port}\n' + text
+path.write_text(new_text, encoding='utf-8', newline='\n')
+PY
+  restart_hysteria_service
+}
+
 create_hysteria_config() {
   ensure_hysteria_missing=0
   if ! hysteria_bin >/dev/null 2>&1; then
@@ -825,9 +859,6 @@ EOF
 ask_node_name
 
 validate_port "$PORT" "监听端口"
-if [ -n "$CONNECT_PORT" ]; then
-  validate_port "$CONNECT_PORT" "公网连接端口"
-fi
 
 ensure_base_dependencies
 SERVER="$(detect_server)"
@@ -874,6 +905,23 @@ echo "BBR: 当前=$BBR_CURRENT 可用=$BBR_AVAILABLE"
 echo "连接地址: $SERVER"
 echo "========================"
 
+if [ "$HY2_EXISTS" -eq 1 ] && [ "$(json_field "$DETECT_TMP" kind)" = "hysteria" ]; then
+  if ask_yes_no "是否修改 hy2 监听端口" "n" 0; then
+    CURRENT_PORT="$(json_field "$DETECT_TMP" port)"
+    PORT="$(ask_port_value "请输入新的 Hysteria2 监听 UDP 端口" "$CURRENT_PORT")"
+    update_hysteria_port "$(json_field "$DETECT_TMP" path)" "$PORT"
+    if detect_existing_hy2 "$DETECT_TMP"; then
+      HY2_EXISTS=1
+      echo "hy2 端口已更新为: $(json_field "$DETECT_TMP" port)"
+    else
+      HY2_EXISTS=0
+      warn "修改端口后未检测到 hy2，请检查配置和服务状态。"
+    fi
+  fi
+elif [ "$HY2_EXISTS" -eq 1 ] && [ "$(json_field "$DETECT_TMP" kind)" = "sing-box" ]; then
+  echo "提示: 检测到 sing-box 内置 hy2，luodi 不自动修改 sing-box 端口。"
+fi
+
 if [ "$BBR_CURRENT" != "bbr" ]; then
   if ask_yes_no "现在安装/启用 BBR" "n" 0; then
     if ! install_bbr; then
@@ -886,7 +934,7 @@ fi
 
 if [ "$HY2_EXISTS" -eq 0 ]; then
   if ask_yes_no "未检测到 hy2，现在安装独立 Hysteria2" "n"; then
-    ask_install_ports
+    ask_hysteria_port
     create_hysteria_config
     if detect_existing_hy2 "$DETECT_TMP"; then
       HY2_EXISTS=1
@@ -901,11 +949,9 @@ if [ "$HY2_EXISTS" -eq 0 ]; then
 fi
 
 if ask_yes_no "现在导出 QIE 导入数据" "y"; then
-  DETECTED_PORT="$(json_field "$DETECT_TMP" port)"
-  ensure_connect_port "$DETECTED_PORT"
   emit_export \
     "$(json_field "$DETECT_TMP" path)" \
-    "$CONNECT_PORT" \
+    "$(json_field "$DETECT_TMP" port)" \
     "$(json_field "$DETECT_TMP" password)" \
     "$(json_field "$DETECT_TMP" sni)" \
     "$EXPORT_TMP"
