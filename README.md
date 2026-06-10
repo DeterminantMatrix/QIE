@@ -109,6 +109,7 @@ qie version
 - 原机器需要已安装并运行 `sing-box`。
 - `qie` 切换节点时不会覆盖原有入站，只会替换自己管理的出站。
 - 切换节点后会检测是否能出站；失败会自动回退到 Direct。
+- 落地机的 Shadowsocks TCP 由 `shadowsocks-rust` 的 `ssserver` 提供，不再安装 sing-box。
 - 落地机端口需要在面板或防火墙中放行：Hy2 默认 `8443/udp`，Shadowsocks 默认 `8388/tcp`。
 
 ## 卸载

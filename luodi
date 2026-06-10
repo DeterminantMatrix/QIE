@@ -16,11 +16,11 @@ YES=0
 SS_PORT="8388"
 SS_PORT_SET=0
 SS_METHOD="2022-blake3-aes-128-gcm"
-SS_CONFIG="/etc/sing-box/qie-shadowsocks.json"
-SS_META="/etc/sing-box/qie-shadowsocks.meta.json"
+SS_CONFIG="/etc/shadowsocks-rust/qie-shadowsocks.json"
+SS_META="/etc/shadowsocks-rust/qie-shadowsocks.meta.json"
 SS_SERVICE="qie-shadowsocks"
 DEFAULT_HYSTERIA_VERSION="2.9.2"
-DEFAULT_SING_BOX_VERSION="1.13.13"
+DEFAULT_SHADOWSOCKS_RUST_VERSION="1.24.0"
 
 usage() {
   cat <<'USAGE'
@@ -346,42 +346,60 @@ install_hysteria_binary() {
   chmod 755 /usr/local/bin/hysteria
 }
 
-singbox_bin() {
-  if have sing-box; then command -v sing-box; return; fi
-  if [ -x /usr/local/bin/sing-box ]; then echo /usr/local/bin/sing-box; return; fi
+ssserver_bin() {
+  if have ssserver; then command -v ssserver; return; fi
+  if [ -x /usr/local/bin/ssserver ]; then echo /usr/local/bin/ssserver; return; fi
   return 1
 }
 
-ensure_alpine_singbox_runtime() {
-  bin="${1:-/usr/local/bin/sing-box}"
-  [ "$(detect_pm)" = "apk" ] || return 0
-  "$bin" version >/dev/null 2>&1 && return 0
-
-  echo "检测到 Alpine，正在安装 sing-box 运行兼容依赖..." >&2
-  apk add --no-cache gcompat libgcc >/dev/null 2>&1 || apk add --no-cache libc6-compat libgcc >/dev/null
-
-  if [ "$(arch_name)" = "amd64" ] && [ ! -e /lib64/ld-linux-x86-64.so.2 ] && [ -e /lib/ld-linux-x86-64.so.2 ]; then
-    mkdir -p /lib64
-    ln -sf /lib/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
-  fi
+shadowsocks_rust_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) echo x86_64-unknown-linux-musl ;;
+    aarch64|arm64) echo aarch64-unknown-linux-musl ;;
+    armv7l|armv7*) echo armv7-unknown-linux-musleabihf ;;
+    i386|i686) echo i686-unknown-linux-musl ;;
+    *) die "不支持的 shadowsocks-rust 架构: $(uname -m)" ;;
+  esac
 }
 
-install_singbox_binary() {
-  need_root
-  arch="$(arch_name)"
-  version="${SING_BOX_VERSION:-$DEFAULT_SING_BOX_VERSION}"
-  url="${SING_BOX_URL:-https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}.tar.gz}"
+install_shadowsocks_rust_package() {
+  case "$(detect_pm)" in
+    apk)
+      apk add --no-cache shadowsocks-rust-ssserver >/dev/null 2>&1 || apk add --no-cache shadowsocks-rust >/dev/null 2>&1
+      ;;
+    apt)
+      apt-get update >/dev/null
+      DEBIAN_FRONTEND=noninteractive apt-get install -y shadowsocks-rust >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+install_shadowsocks_rust_release() {
+  target="$(shadowsocks_rust_arch)"
+  version="${SHADOWSOCKS_RUST_VERSION:-$DEFAULT_SHADOWSOCKS_RUST_VERSION}"
+  url="${SHADOWSOCKS_RUST_URL:-https://github.com/shadowsocks/shadowsocks-rust/releases/download/v${version}/shadowsocks-v${version}.${target}.tar.xz}"
   tmp_dir="$(mktemp -d)"
-  echo "正在安装 sing-box 二进制..." >&2
-  curl -fsSL "$url" -o "$tmp_dir/sing-box.tar.gz"
-  tar -xzf "$tmp_dir/sing-box.tar.gz" -C "$tmp_dir"
-  bin_path="$(find "$tmp_dir" -type f -name sing-box | head -n 1)"
-  [ -n "$bin_path" ] || die "sing-box 压缩包中未找到二进制文件"
-  cp "$bin_path" /usr/local/bin/sing-box
-  chmod 755 /usr/local/bin/sing-box
+  echo "正在安装 shadowsocks-rust ssserver..." >&2
+  curl -fsSL "$url" -o "$tmp_dir/shadowsocks-rust.tar.xz"
+  tar -xJf "$tmp_dir/shadowsocks-rust.tar.xz" -C "$tmp_dir"
+  bin_path="$(find "$tmp_dir" -type f -name ssserver | head -n 1)"
+  [ -n "$bin_path" ] || die "shadowsocks-rust 压缩包中未找到 ssserver"
+  cp "$bin_path" /usr/local/bin/ssserver
+  chmod 755 /usr/local/bin/ssserver
   rm -rf "$tmp_dir"
-  ensure_alpine_singbox_runtime /usr/local/bin/sing-box
-  /usr/local/bin/sing-box version >/dev/null 2>&1 || die "sing-box 已安装但无法运行；请检查系统架构或手动安装 glibc/gcompat 兼容库"
+}
+
+install_shadowsocks_rust() {
+  need_root
+  if install_shadowsocks_rust_package && ssserver_bin >/dev/null 2>&1; then
+    return
+  fi
+  if ! have xz; then
+    install_packages xz
+  fi
+  install_shadowsocks_rust_release
+  ssserver_bin >/dev/null 2>&1 || die "ssserver 已安装但无法运行，请检查系统架构"
 }
 
 detect_server() {
@@ -622,22 +640,17 @@ def valid_meta(data):
 def parse_config(path):
     with open(path, 'r', encoding='utf-8-sig') as f:
         data = json.load(f)
-    for inbound in data.get('inbounds', []):
-        if not isinstance(inbound, dict):
-            continue
-        if inbound.get('type') != 'shadowsocks':
-            continue
-        port = inbound.get('listen_port')
-        method = inbound.get('method')
-        password = inbound.get('password')
-        if port and method and password:
-            return {
-                'kind': 'shadowsocks',
-                'path': path,
-                'port': int(port),
-                'method': method,
-                'password': password,
-            }
+    port = data.get('server_port') or data.get('port')
+    method = data.get('method')
+    password = data.get('password')
+    if port and method and password:
+        return {
+            'kind': 'shadowsocks',
+            'path': path,
+            'port': int(port),
+            'method': method,
+            'password': password,
+        }
     return None
 
 if os.path.isfile(meta_path):
@@ -654,7 +667,7 @@ if os.path.isfile(meta_path):
         pass
 
 paths = [config_path]
-for base in ('/etc/sing-box', '/etc/s-box'):
+for base in ('/etc/shadowsocks-rust', '/etc/shadowsocks-libev'):
     if os.path.isdir(base):
         for name in sorted(os.listdir(base)):
             if name.endswith('.json'):
@@ -821,7 +834,7 @@ EOF_HY2
   ensure_hysteria_service "$CONFIG" "$HYSTERIA"
 }
 
-ensure_singbox_service() {
+ensure_shadowsocks_service() {
   config="$1"
   bin="$2"
   if [ "$NO_START" -eq 1 ]; then
@@ -836,7 +849,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=$bin run -c $config
+ExecStart=$bin -c $config
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=infinity
@@ -854,7 +867,7 @@ EOF_SERVICE
 #!/sbin/openrc-run
 name="$SS_SERVICE"
 command="$bin"
-command_args="run -c $config"
+command_args="-c $config"
 command_background="yes"
 pidfile="/run/$SS_SERVICE.pid"
 depend() {
@@ -867,7 +880,7 @@ EOF_SERVICE
     return
   fi
   if have nohup; then
-    nohup "$bin" run -c "$config" >/var/log/${SS_SERVICE}.log 2>&1 &
+    nohup "$bin" -c "$config" >/var/log/${SS_SERVICE}.log 2>&1 &
     echo "未找到服务管理器，已用后台进程启动 Shadowsocks TCP。" >&2
     return
   fi
@@ -875,13 +888,6 @@ EOF_SERVICE
 }
 
 generate_ss_password() {
-  if singbox_bin >/dev/null 2>&1; then
-    sb="$(singbox_bin)"
-    if "$sb" generate rand --base64 16 >/dev/null 2>&1; then
-      "$sb" generate rand --base64 16
-      return
-    fi
-  fi
   python3 - <<'PY'
 import base64
 import secrets
@@ -890,12 +896,11 @@ PY
 }
 
 create_shadowsocks_config() {
-  if ! singbox_bin >/dev/null 2>&1; then
-    install_singbox_binary
+  if ! ssserver_bin >/dev/null 2>&1; then
+    install_shadowsocks_rust
   fi
-  SINGBOX="$(singbox_bin)"
-  ensure_alpine_singbox_runtime "$SINGBOX"
-  "$SINGBOX" version >/dev/null 2>&1 || die "sing-box 已存在但无法运行；请检查系统架构或手动安装 glibc/gcompat 兼容库"
+  SSSERVER="$(ssserver_bin)"
+  "$SSSERVER" --version >/dev/null 2>&1 || die "ssserver 已存在但无法运行，请检查系统架构"
   ask_ss_port
   need_root
   mkdir -p "$(dirname "$SS_CONFIG")"
@@ -908,22 +913,12 @@ import sys
 config_path, meta_path, port, method, password = sys.argv[1:]
 port = int(port)
 config = {
-    'log': {'level': 'info'},
-    'inbounds': [
-        {
-            'type': 'shadowsocks',
-            'tag': 'ss-in',
-            'listen': '0.0.0.0',
-            'listen_port': port,
-            'method': method,
-            'password': password,
-            'network': 'tcp',
-        }
-    ],
-    'outbounds': [
-        {'type': 'direct', 'tag': 'direct'}
-    ],
-    'route': {'final': 'direct'},
+    'server': '0.0.0.0',
+    'server_port': port,
+    'method': method,
+    'password': password,
+    'mode': 'tcp_only',
+    'timeout': 300,
 }
 meta = {
     'kind': 'shadowsocks',
@@ -939,8 +934,7 @@ with open(meta_path, 'w', encoding='utf-8', newline='\n') as f:
     json.dump(meta, f, ensure_ascii=False, indent=2)
     f.write('\n')
 PY
-  "$SINGBOX" check -c "$SS_CONFIG" >/dev/null
-  ensure_singbox_service "$SS_CONFIG" "$SINGBOX"
+  ensure_shadowsocks_service "$SS_CONFIG" "$SSSERVER"
 }
 
 choose_install_protocol() {
