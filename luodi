@@ -5,86 +5,71 @@ NAME=""
 CONFIG="/etc/hysteria/config.yaml"
 PORT="8443"
 PORT_SET=0
-SS_PORT="8388"
-SS_PORT_SET=0
 SERVER=""
 PASSWORD=""
 SNI="qie.local"
-SS_METHOD="2022-blake3-aes-128-gcm"
 INSTALL_PROTOCOL=""
 NO_START=0
 KEEP_DEPS=0
 YES=0
+
+SS_PORT="8388"
+SS_PORT_SET=0
+SS_METHOD="2022-blake3-aes-128-gcm"
 SS_CONFIG="/etc/sing-box/qie-shadowsocks.json"
 SS_META="/etc/sing-box/qie-shadowsocks.meta.json"
+SS_SERVICE="qie-shadowsocks"
 
 usage() {
-  cat <<'EOF'
-用法:
-  luodi [选项]
+  cat <<'USAGE'
+用法: luodi [选项]
 
 选项:
   -n, --name NAME          qie 菜单中显示的节点名称
   -c, --config FILE        Hysteria2 服务端配置路径，默认 /etc/hysteria/config.yaml
-  -p, --port PORT          Hysteria2 监听端口，默认 8443
-  --vless-port PORT        Shadowsocks TCP TCP 监听端口，默认 443
-  --reality-server NAME    Reality 握手伪装域名，默认 www.microsoft.com
-  --protocol MODE          没有协议服务时安装的模式：hy2 或 ss
-  --server HOST            原机器连接落地机时使用的公网地址/IP
-  --password PASSWORD      Hysteria2 密码；不填则自动生成
-  --sni NAME               TLS SNI，默认 qie.local
-  --no-start               写入配置和导出数据，但不重启 Hysteria2
-  --keep-deps              保留本脚本安装的辅助依赖
+  -p, --port PORT          Hysteria2 监听 UDP 端口，默认 8443
+      --ss-port PORT       Shadowsocks TCP 监听端口，默认 8388
+      --ss-method METHOD   Shadowsocks 加密方法，默认 2022-blake3-aes-128-gcm
+      --protocol MODE      没有协议服务时安装的模式：hy2 或 ss
+      --server HOST        原机器连接落地机时使用的公网地址/IP
+      --password PASSWORD  Hysteria2 密码或 Shadowsocks 密码；不填则自动生成
+      --sni NAME           Hysteria2 自签证书 SNI，默认 qie.local
+      --no-start           写入配置和导出数据，但不重启/启动服务
+      --keep-deps          保留本脚本安装的辅助依赖
   -y, --yes                非交互：自动安装缺失协议并导出
   -h, --help               显示帮助
 
 在落地机上运行。本脚本会先显示检测结果；如果没有可用协议服务，
 会让你选择 Hysteria2/UDP 或 Shadowsocks TCP。
-EOF
+USAGE
 }
 
-die() {
-  echo "错误: $*" >&2
-  exit 1
-}
-
-warn() {
-  echo "警告: $*" >&2
-}
-
-have() {
-  command -v "$1" >/dev/null 2>&1
-}
-
-need_root() {
-  [ "$(id -u)" -eq 0 ] || die "该操作需要 root 权限"
-}
+die() { echo "错误: $*" >&2; exit 1; }
+warn() { echo "警告: $*" >&2; }
+have() { command -v "$1" >/dev/null 2>&1; }
+need_root() { [ "$(id -u)" -eq 0 ] || die "该操作需要 root 权限"; }
 
 ask_yes_no() {
   prompt="$1"
   default="${2:-n}"
   auto="${3:-1}"
-
   if [ "$YES" -eq 1 ] && [ "$auto" -eq 1 ]; then
     echo "$prompt: 是（自动确认）" >&2
     return 0
   fi
-
   if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
     [ "$default" = "y" ]
     return
   fi
-
   if [ "$default" = "y" ]; then
     printf "%s [Y/n]: " "$prompt" >/dev/tty
   else
     printf "%s [y/N]: " "$prompt" >/dev/tty
   fi
-
   IFS= read -r answer </dev/tty || answer=""
   case "$answer" in
-    y|Y|yes|YES) return 0 ;;
-    n|N|no|NO) return 1 ;;
+    y|Y|yes|YES|Yes) return 0 ;;
+    n|N|no|NO|No) return 1 ;;
     '') [ "$default" = "y" ] ;;
     *) return 1 ;;
   esac
@@ -94,21 +79,19 @@ ask_node_name() {
   if [ -n "$NAME" ]; then
     return
   fi
-
-  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
-    while :; do
-      printf "请为这台落地机起一个名字: " >/dev/tty
-      IFS= read -r input_name </dev/tty || input_name=""
-      input_name="$(printf "%s" "$input_name" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-      if [ -n "$input_name" ]; then
-        NAME="$input_name"
-        return
-      fi
-      echo "名称不能为空。" >/dev/tty
-    done
+  default="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo node)"
+  if [ "$YES" -eq 1 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+    NAME="$default"
+    return
   fi
-
-  NAME="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo node)"
+  while :; do
+    printf "请输入 qie 菜单中显示的节点名称 [%s]: " "$default" >/dev/tty
+    IFS= read -r input_name </dev/tty || input_name=""
+    case "$input_name" in
+      '') NAME="$default"; return ;;
+      *) NAME="$input_name"; return ;;
+    esac
+  done
 }
 
 validate_port() {
@@ -125,19 +108,16 @@ validate_port() {
 ask_port_value() {
   prompt="$1"
   default="$2"
-
   if [ "$YES" -eq 1 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
     echo "$default"
     return
   fi
-
   while :; do
     printf "%s [%s]: " "$prompt" "$default" >/dev/tty
     IFS= read -r input_port </dev/tty || input_port=""
-    input_port="$(printf "%s" "$input_port" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    [ -n "$input_port" ] || input_port="$default"
     case "$input_port" in
-      *[!0-9]*|'') echo "端口必须是 1-65535 的数字。" >/dev/tty ;;
+      '') echo "$default"; return ;;
+      *[!0-9]*) echo "端口必须是 1-65535 的数字。" >/dev/tty ;;
       *)
         if [ "$input_port" -ge 1 ] && [ "$input_port" -le 65535 ]; then
           echo "$input_port"
@@ -151,25 +131,19 @@ ask_port_value() {
 
 ask_server_host() {
   default="${1:-}"
-
   if [ "$YES" -eq 1 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
     echo "$default"
     return
   fi
-
   while :; do
     if [ -n "$default" ]; then
-      printf "检测到 Alpine/LXC，请输入落地机公网 IP 或域名 [%s]: " "$default" >/dev/tty
+      printf "请输入落地机公网 IP 或域名 [%s]: " "$default" >/dev/tty
     else
-      printf "检测到 Alpine/LXC，请输入落地机公网 IP 或域名: " >/dev/tty
+      printf "请输入落地机公网 IP 或域名: " >/dev/tty
     fi
-
     IFS= read -r input_host </dev/tty || input_host=""
-    input_host="$(printf "%s" "$input_host" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    [ -n "$input_host" ] || input_host="$default"
-
     case "$input_host" in
-      *[[:space:]]*|'') echo "公网 IP 或域名不能为空，且不能包含空格。" >/dev/tty ;;
+      '') [ -n "$default" ] && echo "$default" && return ;;
       *) echo "$input_host"; return ;;
     esac
   done
@@ -181,22 +155,20 @@ ask_hysteria_port() {
   fi
   validate_port "$PORT" "监听端口"
 }
+
 ask_ss_port() {
- if [ "$SS_PORT_SET" -eq 0 ]; then
-  SS_PORT="$(ask_port_value "请输入 Shadowsocks TCP 监听端口" "$SS_PORT")"
- fi
- validate_port "$SS_PORT" "Shadowsocks TCP 监听端口"
+  if [ "$SS_PORT_SET" -eq 0 ]; then
+    SS_PORT="$(ask_port_value "请输入 Shadowsocks TCP 监听端口" "$SS_PORT")"
+  fi
+  validate_port "$SS_PORT" "Shadowsocks TCP 监听端口"
 }
+
 normalize_protocol() {
- case "$1" in
-  hy2|hysteria|hysteria2|udp) echo hy2 ;;
-  ss|shadowsocks|shadowsocks-tcp|tcp) echo ss ;;
-  vless|reality|vless-reality)
-   warn "Shadowsocks TCP TCP 已替换为 Shadowsocks TCP，继续使用 ss"
-   echo ss
-   ;;
-  *) die "无效协议模式: $1，请使用 hy2 或 ss" ;;
- esac
+  case "$1" in
+    hy2|hysteria|hysteria2|udp) echo hy2 ;;
+    ss|shadowsocks|shadowsocks-tcp|tcp) echo ss ;;
+    *) die "无效协议模式: $1，请使用 hy2 或 ss" ;;
+  esac
 }
 
 while [ "$#" -gt 0 ]; do
@@ -217,10 +189,27 @@ while [ "$#" -gt 0 ]; do
       PORT_SET=1
       shift 2
       ;;
-    --vless-port)
+    --ss-port)
       [ "$#" -ge 2 ] || die "$1 需要参数值"
       SS_PORT="$2"
       SS_PORT_SET=1
+      shift 2
+      ;;
+    --ss-method)
+      [ "$#" -ge 2 ] || die "$1 需要参数值"
+      SS_METHOD="$2"
+      shift 2
+      ;;
+    --vless-port)
+      [ "$#" -ge 2 ] || die "$1 需要参数值"
+      warn "--vless-port 已废弃；本版本将其兼容为 --ss-port。"
+      SS_PORT="$2"
+      SS_PORT_SET=1
+      shift 2
+      ;;
+    --reality-server)
+      [ "$#" -ge 2 ] || die "$1 需要参数值"
+      warn "--reality-server 已废弃；Shadowsocks TCP 不使用 Reality 握手域名。"
       shift 2
       ;;
     --protocol|--mode)
@@ -259,9 +248,7 @@ while [ "$#" -gt 0 ]; do
       usage
       exit 0
       ;;
-    *)
-      die "未知选项: $1"
-      ;;
+    *) die "未知选项: $1" ;;
   esac
 done
 
@@ -278,16 +265,12 @@ detect_pm() {
 install_packages() {
   pm="$(detect_pm)"
   case "$pm" in
-    apk)
-      apk add --no-cache "$@" >/dev/null
-      ;;
+    apk) apk add --no-cache "$@" >/dev/null ;;
     apt)
       apt-get update >/dev/null
       DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null
       ;;
-    *)
-      die "不支持的包管理器，请手动安装依赖: $*"
-      ;;
+    *) die "不支持的包管理器，请手动安装依赖: $*" ;;
   esac
 }
 
@@ -295,15 +278,17 @@ ensure_base_dependencies() {
   HAD_CURL=0
   HAD_PYTHON3=0
   HAD_OPENSSL=0
+  HAD_TAR=0
   have curl && HAD_CURL=1
   have python3 && HAD_PYTHON3=1
   have openssl && HAD_OPENSSL=1
+  have tar && HAD_TAR=1
 
   missing=""
   have curl || missing="$missing curl"
   have python3 || missing="$missing python3"
   have openssl || missing="$missing openssl"
-
+  have tar || missing="$missing tar"
   if [ -n "$missing" ]; then
     need_root
     echo "正在安装基础依赖:$missing" >&2
@@ -314,24 +299,20 @@ ensure_base_dependencies() {
 remove_alpine_package_if_new() {
   pkg="$1"
   was_present="$2"
-
   if [ "$KEEP_DEPS" -eq 1 ] || [ "$was_present" -eq 1 ]; then
     return
   fi
-
   if have apk && apk info -e "$pkg" >/dev/null 2>&1; then
     apk del "$pkg" >/dev/null 2>&1 || true
   fi
 }
 
 cleanup_after_export() {
-  rm -f /etc/s-box/certs/qie-hy2.crt /etc/s-box/certs/qie-hy2.key 2>/dev/null || true
-  rmdir /etc/s-box/certs /etc/s-box 2>/dev/null || true
-
   if [ "$(detect_pm)" = "apk" ]; then
     remove_alpine_package_if_new curl "$HAD_CURL"
     remove_alpine_package_if_new python3 "$HAD_PYTHON3"
     remove_alpine_package_if_new openssl "$HAD_OPENSSL"
+    remove_alpine_package_if_new tar "$HAD_TAR"
   fi
 }
 
@@ -347,18 +328,9 @@ arch_name() {
 }
 
 hysteria_bin() {
-  if have hysteria; then
-    command -v hysteria
-    return
-  fi
-  if have hysteria2; then
-    command -v hysteria2
-    return
-  fi
-  if [ -x /usr/local/bin/hysteria ]; then
-    echo /usr/local/bin/hysteria
-    return
-  fi
+  if have hysteria; then command -v hysteria; return; fi
+  if have hysteria2; then command -v hysteria2; return; fi
+  if [ -x /usr/local/bin/hysteria ]; then echo /usr/local/bin/hysteria; return; fi
   return 1
 }
 
@@ -369,11 +341,9 @@ install_hysteria_binary() {
 import json
 import sys
 import urllib.request
-
 arch = sys.argv[1]
 with urllib.request.urlopen('https://api.github.com/repos/apernet/hysteria/releases/latest', timeout=20) as r:
     data = json.load(r)
-
 target = f'hysteria-linux-{arch}'
 for asset in data.get('assets', []):
     if asset.get('name') == target:
@@ -389,14 +359,8 @@ PY
 }
 
 singbox_bin() {
-  if have sing-box; then
-    command -v sing-box
-    return
-  fi
-  if [ -x /usr/local/bin/sing-box ]; then
-    echo /usr/local/bin/sing-box
-    return
-  fi
+  if have sing-box; then command -v sing-box; return; fi
+  if [ -x /usr/local/bin/sing-box ]; then echo /usr/local/bin/sing-box; return; fi
   return 1
 }
 
@@ -407,11 +371,9 @@ install_singbox_binary() {
 import json
 import sys
 import urllib.request
-
 arch = sys.argv[1]
 with urllib.request.urlopen('https://api.github.com/repos/SagerNet/sing-box/releases/latest', timeout=20) as r:
     data = json.load(r)
-
 suffix = f'linux-{arch}.tar.gz'
 for asset in data.get('assets', []):
     name = asset.get('name', '')
@@ -438,7 +400,6 @@ detect_server() {
     echo "$SERVER"
     return
   fi
-
   if [ "$(detect_pm)" = "apk" ]; then
     typed="$(ask_server_host "")"
     if [ -n "$typed" ]; then
@@ -447,32 +408,29 @@ detect_server() {
     fi
     warn "Alpine/LXC 未输入公网 IP，尝试自动探测；如结果不正确，请使用 --server HOST。"
   fi
-
-  for url in \
-    https://api.ipify.org \
-    https://ifconfig.me/ip \
-    https://icanhazip.com
-  do
+  for url in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com; do
     ip="$(curl -4fsSL --max-time 6 "$url" 2>/dev/null | tr -d ' \r\n' || true)"
     if [ -n "$ip" ]; then
       echo "$ip"
       return
     fi
   done
-
   host="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
   [ -n "$host" ] || die "无法自动检测公网 IP，请使用 --server HOST 指定"
   echo "$host"
 }
 
-singbox_exists() {
-  if have sing-box; then
-    return 0
-  fi
-  for path in /etc/s-box/sb.json /etc/sing-box/config.json /usr/local/etc/sing-box/config.json /etc/s-box/*.json /etc/sing-box/*.json; do
-    [ -f "$path" ] && return 0
-  done
-  return 1
+json_field() {
+  file="$1"
+  key="$2"
+  python3 - "$file" "$key" <<'PY'
+import json
+import sys
+with open(sys.argv[1], 'r', encoding='utf-8-sig') as f:
+    data = json.load(f)
+value = data.get(sys.argv[2], '')
+print(value)
+PY
 }
 
 detect_existing_hy2() {
@@ -483,7 +441,6 @@ import os
 import re
 import ssl
 import sys
-from urllib.parse import urlparse
 
 out = sys.argv[1]
 
@@ -521,61 +478,14 @@ def cert_name(path):
         cert = ssl._ssl._test_decode_cert(path)
     except Exception:
         return None
-
     for item in cert.get('subjectAltName', ()):
         if len(item) == 2 and item[0].lower() == 'dns' and item[1]:
             return item[1]
-
     for rdn in cert.get('subject', ()):
         for key, value in rdn:
             if key == 'commonName' and value:
                 return value
-
     return None
-
-def detect_hysteria_sni(path, text):
-    for key in ('sni', 'serverName', 'servername', 'server_name'):
-        value = clean_scalar(find_scalar(text, key))
-        if value:
-            return value
-
-    cert_path = resolve_path(path, find_scalar(text, 'cert'))
-    name = cert_name(cert_path)
-    if name:
-        return name
-
-    domains = re.search(r'(?ms)^\s*domains\s*:\s*\n((?:\s*-\s*[^\n#]+\n?)+)', text)
-    if domains:
-        m = re.search(r'^\s*-\s*["\']?([^"\'\n#]+)', domains.group(1), re.M)
-        if m:
-            return clean_scalar(m.group(1))
-
-    url = clean_scalar(find_scalar(text, 'url'))
-    if url:
-        parsed = urlparse(url)
-        if parsed.hostname:
-            return parsed.hostname
-
-    return ''
-
-def parse_hysteria_config(path):
-    text = read_text(path)
-    if not text.strip():
-        return None
-    password = find_scalar(text, 'password')
-    listen = find_scalar(text, 'listen')
-    if not password or not listen:
-        return None
-    m = re.search(r':(\d+)$', listen)
-    if not m:
-        return None
-    return {
-        'kind': 'hysteria',
-        'path': path,
-        'port': int(m.group(1)),
-        'password': password,
-        'sni': detect_hysteria_sni(path, text),
-    }
 
 def split_host_port(server_value):
     if not isinstance(server_value, str):
@@ -595,6 +505,30 @@ def split_host_port(server_value):
         except ValueError:
             return s, None
     return s, None
+
+def detect_hysteria_sni(path, text):
+    for key in ('sni', 'serverName', 'servername', 'server_name'):
+        value = clean_scalar(find_scalar(text, key))
+        if value:
+            return value
+    cert_path = resolve_path(path, find_scalar(text, 'cert'))
+    name = cert_name(cert_path)
+    if name:
+        return name
+    return ''
+
+def parse_hysteria_config(path):
+    text = read_text(path)
+    if not text.strip():
+        return None
+    password = clean_scalar(find_scalar(text, 'password'))
+    listen = clean_scalar(find_scalar(text, 'listen'))
+    if not password or not listen:
+        return None
+    m = re.search(r':(\d+)$', listen)
+    if not m:
+        return None
+    return {'kind': 'hysteria', 'path': path, 'port': int(m.group(1)), 'password': password, 'sni': detect_hysteria_sni(path, text)}
 
 def parse_singbox_config(path):
     with open(path, 'r', encoding='utf-8-sig') as f:
@@ -634,7 +568,6 @@ if os.path.isdir('/etc/hysteria'):
     for name in sorted(os.listdir('/etc/hysteria')):
         if name.endswith(('.yaml', '.yml')):
             hysteria_paths.append(os.path.join('/etc/hysteria', name))
-
 seen = set()
 for path in hysteria_paths:
     if path in seen or not os.path.isfile(path):
@@ -651,7 +584,6 @@ for base in ('/etc/s-box', '/etc/sing-box'):
         for name in sorted(os.listdir(base)):
             if name.endswith('.json'):
                 singbox_paths.append(os.path.join(base, name))
-
 seen = set()
 for path in singbox_paths:
     if path in seen or not os.path.isfile(path):
@@ -659,8 +591,7 @@ for path in singbox_paths:
     seen.add(path)
     try:
         parsed = parse_singbox_config(path)
-    except Exception as e:
-        print(f'跳过无法读取的 sing-box 配置 {path}: {e}', file=sys.stderr)
+    except Exception:
         continue
     if parsed:
         write(parsed)
@@ -670,112 +601,441 @@ write({'kind': '', 'path': '', 'port': '', 'password': '', 'sni': ''})
 raise SystemExit(2)
 PY
 }
+
 detect_existing_shadowsocks() {
- out="$1"
- python3 - "$out" "$SS_META" <<'PY'
+  out="$1"
+  python3 - "$out" "$SS_META" "$SS_CONFIG" <<'PY'
 import json
 import os
 import sys
 
-out, meta_path = sys.argv[1:3]
-empty = {
-    'kind': '',
-    'path': '',
-    'port': '',
-    'method': '',
-    'password': '',
-}
+out, meta_path, config_path = sys.argv[1:4]
+empty = {'kind': '', 'path': '', 'port': '', 'method': '', 'password': ''}
 
 def write(result):
     with open(out, 'w', encoding='utf-8', newline='\n') as f:
         json.dump(result, f, ensure_ascii=False)
         f.write('\n')
 
-if not os.path.isfile(meta_path):
-    write(empty)
-    raise SystemExit(2)
+def valid_meta(data):
+    required = ('path', 'port', 'method', 'password')
+    if not all(data.get(k) for k in required):
+        return None
+    if not os.path.isfile(str(data.get('path'))):
+        return None
+    try:
+        data['port'] = int(data['port'])
+    except Exception:
+        return None
+    data['kind'] = 'shadowsocks'
+    return data
 
-try:
-    with open(meta_path, 'r', encoding='utf-8-sig') as f:
+def parse_config(path):
+    with open(path, 'r', encoding='utf-8-sig') as f:
         data = json.load(f)
-except Exception:
-    write(empty)
-    raise SystemExit(2)
+    for inbound in data.get('inbounds', []):
+        if not isinstance(inbound, dict):
+            continue
+        if inbound.get('type') != 'shadowsocks':
+            continue
+        port = inbound.get('listen_port')
+        method = inbound.get('method')
+        password = inbound.get('password')
+        if port and method and password:
+            return {
+                'kind': 'shadowsocks',
+                'path': path,
+                'port': int(port),
+                'method': method,
+                'password': password,
+            }
+    return None
 
-required = ('path', 'port', 'method', 'password')
-if not all(data.get(k) for k in required):
-    write(empty)
-    raise SystemExit(2)
+if os.path.isfile(meta_path):
+    try:
+        with open(meta_path, 'r', encoding='utf-8-sig') as f:
+            meta = json.load(f)
+        parsed = valid_meta(meta)
+        if parsed:
+            write(parsed)
+            raise SystemExit(0)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
 
-if not os.path.isfile(str(data.get('path'))):
-    write(empty)
-    raise SystemExit(2)
+paths = [config_path]
+for base in ('/etc/sing-box', '/etc/s-box'):
+    if os.path.isdir(base):
+        for name in sorted(os.listdir(base)):
+            if name.endswith('.json'):
+                paths.append(os.path.join(base, name))
+seen = set()
+for path in paths:
+    if path in seen or not os.path.isfile(path):
+        continue
+    seen.add(path)
+    try:
+        parsed = parse_config(path)
+    except Exception:
+        continue
+    if parsed:
+        write(parsed)
+        raise SystemExit(0)
 
-data['kind'] = 'shadowsocks'
-write(data)
-raise SystemExit(0)
+write(empty)
+raise SystemExit(2)
 PY
 }
 
-json_field() {
-  file="$1"
-  key="$2"
-  python3 - "$file" "$key" <<'PY'
+ensure_hysteria_service() {
+  config="$1"
+  bin="$2"
+  if [ "$NO_START" -eq 1 ]; then
+    echo "已设置 --no-start，跳过 Hysteria2 服务启动。" >&2
+    return
+  fi
+  if have systemctl; then
+    cat >/etc/systemd/system/hysteria-server.service <<EOF_SERVICE
+[Unit]
+Description=Hysteria2 Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=$bin server -c $config
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF_SERVICE
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable hysteria-server.service >/dev/null 2>&1 || true
+    systemctl restart hysteria-server.service
+    return
+  fi
+  if have rc-service; then
+    cat >/etc/init.d/hysteria-server <<EOF_SERVICE
+#!/sbin/openrc-run
+name="hysteria-server"
+command="$bin"
+command_args="server -c $config"
+command_background="yes"
+pidfile="/run/hysteria-server.pid"
+depend() {
+  need net
+}
+EOF_SERVICE
+    chmod +x /etc/init.d/hysteria-server
+    rc-update add hysteria-server default >/dev/null 2>&1 || true
+    rc-service hysteria-server restart
+    return
+  fi
+  if have nohup; then
+    nohup "$bin" server -c "$config" >/var/log/hysteria-server.log 2>&1 &
+    echo "未找到服务管理器，已用后台进程启动 Hysteria2。" >&2
+    return
+  fi
+  die "无法启动 Hysteria2：未找到 systemctl、rc-service 或可用的后台启动方式"
+}
+
+restart_hysteria_service() {
+  if [ "$NO_START" -eq 1 ]; then
+    echo "已设置 --no-start，跳过 Hysteria2 重启。" >&2
+    return
+  fi
+  if have systemctl; then
+    for svc in hysteria-server hysteria; do
+      if systemctl cat "$svc.service" >/dev/null 2>&1; then
+        systemctl restart "$svc.service"
+        return
+      fi
+    done
+  fi
+  if have rc-service; then
+    for svc in hysteria-server hysteria; do
+      if [ -x "/etc/init.d/$svc" ]; then
+        rc-service "$svc" restart
+        return
+      fi
+    done
+  fi
+  if have service; then
+    for svc in hysteria-server hysteria; do
+      if service "$svc" status >/dev/null 2>&1; then
+        service "$svc" restart
+        return
+      fi
+    done
+  fi
+  warn "未找到可重启的 Hysteria2 服务，请手动重启。"
+}
+
+update_hysteria_port() {
+  config="$1"
+  new_port="$2"
+  validate_port "$new_port" "监听端口"
+  need_root
+  python3 - "$config" "$new_port" <<'PY'
+import re
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+port = sys.argv[2]
+text = path.read_text(encoding='utf-8-sig')
+pattern = re.compile(r'(?m)^(\s*listen\s*:\s*)([^#\n]*?)(\s*#.*)?$')
+def repl(match):
+    return f'{match.group(1)}:{port}{match.group(3) or ""}'
+new_text, count = pattern.subn(repl, text, count=1)
+if count == 0:
+    new_text = f'listen: :{port}\n' + text
+path.write_text(new_text, encoding='utf-8', newline='\n')
+PY
+  restart_hysteria_service
+}
+
+create_hysteria_config() {
+  if ! hysteria_bin >/dev/null 2>&1; then
+    install_hysteria_binary
+  fi
+  HYSTERIA="$(hysteria_bin)"
+  ask_hysteria_port
+  need_root
+  mkdir -p "$(dirname "$CONFIG")" /etc/hysteria/certs
+  cert="/etc/hysteria/certs/qie-hy2.crt"
+  key="/etc/hysteria/certs/qie-hy2.key"
+  if [ ! -f "$cert" ] || [ ! -f "$key" ]; then
+    echo "正在生成自签 TLS 证书..." >&2
+    openssl req -x509 -newkey rsa:2048 -keyout "$key" -out "$cert" -days 3650 -nodes -subj "/CN=$SNI" >/dev/null 2>&1
+    chmod 600 "$key"
+  fi
+  if [ -z "$PASSWORD" ]; then
+    PASSWORD="$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(24))
+PY
+)"
+  fi
+  cat >"$CONFIG" <<EOF_HY2
+listen: :$PORT
+
+tls:
+  cert: $cert
+  key: $key
+
+auth:
+  type: password
+  password: $PASSWORD
+EOF_HY2
+  ensure_hysteria_service "$CONFIG" "$HYSTERIA"
+}
+
+ensure_singbox_service() {
+  config="$1"
+  bin="$2"
+  if [ "$NO_START" -eq 1 ]; then
+    echo "已设置 --no-start，跳过 Shadowsocks TCP 服务启动。" >&2
+    return
+  fi
+  if have systemctl; then
+    cat >/etc/systemd/system/${SS_SERVICE}.service <<EOF_SERVICE
+[Unit]
+Description=QIE Shadowsocks TCP
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=$bin run -c $config
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF_SERVICE
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable ${SS_SERVICE}.service >/dev/null 2>&1 || true
+    systemctl restart ${SS_SERVICE}.service
+    return
+  fi
+  if have rc-service; then
+    cat >/etc/init.d/${SS_SERVICE} <<EOF_SERVICE
+#!/sbin/openrc-run
+name="$SS_SERVICE"
+command="$bin"
+command_args="run -c $config"
+command_background="yes"
+pidfile="/run/$SS_SERVICE.pid"
+depend() {
+  need net
+}
+EOF_SERVICE
+    chmod +x /etc/init.d/${SS_SERVICE}
+    rc-update add ${SS_SERVICE} default >/dev/null 2>&1 || true
+    rc-service ${SS_SERVICE} restart
+    return
+  fi
+  if have nohup; then
+    nohup "$bin" run -c "$config" >/var/log/${SS_SERVICE}.log 2>&1 &
+    echo "未找到服务管理器，已用后台进程启动 Shadowsocks TCP。" >&2
+    return
+  fi
+  die "无法启动 Shadowsocks TCP：未找到 systemctl、rc-service 或可用的后台启动方式"
+}
+
+generate_ss_password() {
+  if singbox_bin >/dev/null 2>&1; then
+    sb="$(singbox_bin)"
+    if "$sb" generate rand --base64 16 >/dev/null 2>&1; then
+      "$sb" generate rand --base64 16
+      return
+    fi
+  fi
+  python3 - <<'PY'
+import base64
+import secrets
+print(base64.b64encode(secrets.token_bytes(16)).decode())
+PY
+}
+
+create_shadowsocks_config() {
+  if ! singbox_bin >/dev/null 2>&1; then
+    install_singbox_binary
+  fi
+  SINGBOX="$(singbox_bin)"
+  ask_ss_port
+  need_root
+  mkdir -p "$(dirname "$SS_CONFIG")"
+  if [ -z "$PASSWORD" ]; then
+    PASSWORD="$(generate_ss_password)"
+  fi
+  python3 - "$SS_CONFIG" "$SS_META" "$SS_PORT" "$SS_METHOD" "$PASSWORD" <<'PY'
+import json
+import sys
+config_path, meta_path, port, method, password = sys.argv[1:]
+port = int(port)
+config = {
+    'log': {'level': 'info'},
+    'inbounds': [
+        {
+            'type': 'shadowsocks',
+            'tag': 'ss-in',
+            'listen': '0.0.0.0',
+            'listen_port': port,
+            'method': method,
+            'password': password,
+            'network': 'tcp',
+        }
+    ],
+    'outbounds': [
+        {'type': 'direct', 'tag': 'direct'}
+    ],
+    'route': {'final': 'direct'},
+}
+meta = {
+    'kind': 'shadowsocks',
+    'path': config_path,
+    'port': port,
+    'method': method,
+    'password': password,
+}
+with open(config_path, 'w', encoding='utf-8', newline='\n') as f:
+    json.dump(config, f, ensure_ascii=False, indent=2)
+    f.write('\n')
+with open(meta_path, 'w', encoding='utf-8', newline='\n') as f:
+    json.dump(meta, f, ensure_ascii=False, indent=2)
+    f.write('\n')
+PY
+  "$SINGBOX" check -c "$SS_CONFIG" >/dev/null
+  ensure_singbox_service "$SS_CONFIG" "$SINGBOX"
+}
+
+choose_install_protocol() {
+  if [ -n "$INSTALL_PROTOCOL" ]; then
+    echo "$INSTALL_PROTOCOL"
+    return
+  fi
+  if [ "$YES" -eq 1 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+    echo hy2
+    return
+  fi
+  while :; do
+    echo "未检测到可用协议服务，请选择安装模式：" >/dev/tty
+    echo " 1) Hysteria2 / UDP" >/dev/tty
+    echo " 2) Shadowsocks / TCP" >/dev/tty
+    printf "请选择 [1/2，默认 1]: " >/dev/tty
+    IFS= read -r answer </dev/tty || answer=""
+    case "$answer" in
+      ''|1) echo hy2; return ;;
+      2) echo ss; return ;;
+      *) echo "请输入 1 或 2。" >/dev/tty ;;
+    esac
+  done
+}
+
+choose_export_protocol() {
+  if [ "$HY2_EXISTS" -eq 1 ] && [ "$SS_EXISTS" -eq 1 ]; then
+    if [ "$YES" -eq 1 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+      if [ -n "$INSTALL_PROTOCOL" ]; then
+        echo "$INSTALL_PROTOCOL"
+      else
+        echo hy2
+      fi
+      return
+    fi
+    while :; do
+      echo "检测到多个可导出的协议，请选择导出：" >/dev/tty
+      echo " 1) Hysteria2 / UDP" >/dev/tty
+      echo " 2) Shadowsocks / TCP" >/dev/tty
+      printf "请选择 [1/2，默认 1]: " >/dev/tty
+      IFS= read -r answer </dev/tty || answer=""
+      case "$answer" in
+        ''|1) echo hy2; return ;;
+        2) echo ss; return ;;
+        *) echo "请输入 1 或 2。" >/dev/tty ;;
+      esac
+    done
+  elif [ "$HY2_EXISTS" -eq 1 ]; then
+    echo hy2
+  elif [ "$SS_EXISTS" -eq 1 ]; then
+    echo ss
+  else
+    echo ""
+  fi
+}
+
+emit_node_block() {
+  payload_file="$1"
+  python3 - "$payload_file" <<'PY'
+import base64
 import json
 import sys
 with open(sys.argv[1], 'r', encoding='utf-8-sig') as f:
     data = json.load(f)
-value = data.get(sys.argv[2], '')
-print(value)
+raw = json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+print('QIE_NODE_BEGIN')
+print(base64.b64encode(raw).decode('ascii'))
+print('QIE_NODE_END')
 PY
 }
 
-bbr_current() {
-  sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null \
-    || cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null \
-    || echo unknown
-}
-
-bbr_available() {
-  sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null \
-    || cat /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null \
-    || echo unknown
-}
-
-install_bbr() {
-  need_root
-  if ! have bash; then
-    echo "正在为 BBR 工具安装 bash..." >&2
-    install_packages bash
-  fi
-  have curl || install_packages curl
-
-  echo "正在运行 BBR 工具..." >&2
-  if [ -r /dev/tty ]; then
-    bash -c 'set -e; bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/install-alias.sh?$(date +%s)"); bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/net-tcp-tune.sh?$(date +%s)")' </dev/tty
-  else
-    bash -c 'set -e; bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/install-alias.sh?$(date +%s)"); bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/net-tcp-tune.sh?$(date +%s)")'
-  fi
-}
-
-emit_export() {
-  source_path="$1"
-  port="$2"
-  password="$3"
-  sni="$4"
-  out="$5"
+export_hysteria() {
+  result_file="$1"
+  SERVER="$(detect_server)"
+  port="$(json_field "$result_file" port)"
+  password="$(json_field "$result_file" password)"
+  sni="$(json_field "$result_file" sni)"
   [ -n "$sni" ] || sni="$SNI"
-  python3 - "$SERVER" "$sni" "$NAME" "$source_path" "$port" "$password" "$out" <<'PY'
-import base64
+  tmp="$(mktemp)"
+  python3 - "$tmp" "$NAME" "$SERVER" "$port" "$password" "$sni" <<'PY'
 import json
-import socket
 import sys
-import time
-
-server, sni, name, source_path, port, password, out = sys.argv[1:]
+out, name, server, port, password, sni = sys.argv[1:]
 port = int(port)
-client_config = {
-    'log': {'level': 'info'},
+config = {
+    'log': {'level': 'error'},
     'inbounds': [
         {
             'type': 'mixed',
@@ -800,55 +1060,41 @@ client_config = {
         },
         {'type': 'direct', 'tag': 'direct'},
     ],
-    'route': {'rules': [], 'final': 'proxy'},
+    'route': {'final': 'proxy'},
 }
 payload = {
     'format': 'qie-node',
     'version': 1,
     'name': name,
-    'source_host': socket.gethostname(),
-    'source_config': source_path,
-    'exported_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
-    'server': server,
-    'server_port': port,
-    'sni': sni,
     'protocol': 'hysteria2',
     'test_protocol': 'udp',
-    'config': client_config,
+    'server': server,
+    'port': port,
+    'config': config,
 }
-raw = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-encoded = base64.b64encode(raw).decode('ascii')
 with open(out, 'w', encoding='utf-8', newline='\n') as f:
-    f.write('QIE_NODE_BEGIN\n')
-    for i in range(0, len(encoded), 76):
-        f.write(encoded[i:i + 76] + '\n')
-    f.write('QIE_NODE_END\n')
+    json.dump(payload, f, ensure_ascii=False, indent=2)
+    f.write('\n')
 PY
+  echo "已生成 Hysteria2/UDP 节点：$NAME -> $SERVER:$port" >&2
+  emit_node_block "$tmp"
+  rm -f "$tmp"
 }
-emit_shadowsocks_export() {
- source_path="$1"
- port="$2"
- if [ "$#" -eq 7 ]; then
-  # Backward-compatible call shape after the old VLESS export call has been renamed.
-  method="$(json_field "$SS_INFO" method)"
-  password="$(json_field "$SS_INFO" password)"
-  out="$7"
- else
-  method="$3"
-  password="$4"
-  out="$5"
- fi
- python3 - "$SERVER" "$NAME" "$source_path" "$port" "$method" "$password" "$out" <<'PY'
-import base64
-import json
-import socket
-import sys
-import time
 
-server, name, source_path, port, method, password, out = sys.argv[1:]
+export_shadowsocks() {
+  result_file="$1"
+  SERVER="$(detect_server)"
+  port="$(json_field "$result_file" port)"
+  method="$(json_field "$result_file" method)"
+  password="$(json_field "$result_file" password)"
+  tmp="$(mktemp)"
+  python3 - "$tmp" "$NAME" "$SERVER" "$port" "$method" "$password" <<'PY'
+import json
+import sys
+out, name, server, port, method, password = sys.argv[1:]
 port = int(port)
-client_config = {
-    'log': {'level': 'info'},
+config = {
+    'log': {'level': 'error'},
     'inbounds': [
         {
             'type': 'mixed',
@@ -869,542 +1115,90 @@ client_config = {
         },
         {'type': 'direct', 'tag': 'direct'},
     ],
-    'route': {'rules': [], 'final': 'proxy'},
+    'route': {'final': 'proxy'},
 }
 payload = {
     'format': 'qie-node',
     'version': 1,
     'name': name,
-    'source_host': socket.gethostname(),
-    'source_config': source_path,
-    'exported_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
-    'server': server,
-    'server_port': port,
-    'method': method,
     'protocol': 'shadowsocks',
     'test_protocol': 'tcp',
-    'config': client_config,
-}
-raw = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-encoded = base64.b64encode(raw).decode('ascii')
-with open(out, 'w', encoding='utf-8', newline='\n') as f:
-    f.write('QIE_NODE_BEGIN\n')
-    for i in range(0, len(encoded), 76):
-        f.write(encoded[i:i + 76] + '\n')
-    f.write('QIE_NODE_END\n')
-PY
-}
-
-detect_existing_config() {
-  if [ -f "$CONFIG" ]; then
-    echo "$CONFIG"
-    return
-  fi
-  for candidate in /etc/hysteria/config.yaml /etc/hysteria/config.yml /etc/hysteria/*.yaml /etc/hysteria/*.yml; do
-    [ -f "$candidate" ] && {
-      echo "$candidate"
-      return
-    }
-  done
-  echo "$CONFIG"
-}
-
-ensure_service() {
-  config="$1"
-  bin="$2"
-
-  if [ "$NO_START" -eq 1 ]; then
-    echo "已设置 --no-start，跳过 Hysteria2 重启。" >&2
-    return
-  fi
-
-  if have systemctl; then
-    if ! systemctl cat hysteria-server.service >/dev/null 2>&1; then
-      cat >/etc/systemd/system/hysteria-server.service <<EOF
-[Unit]
-Description=Hysteria2 server for QIE
-After=network.target
-
-[Service]
-ExecStart=$bin server -c $config
-Restart=on-failure
-RestartSec=10
-LimitNOFILE=infinity
-
-[Install]
-WantedBy=multi-user.target
-EOF
-      systemctl daemon-reload
-    fi
-    systemctl enable hysteria-server >/dev/null 2>&1 || true
-    systemctl restart hysteria-server
-    return
-  fi
-
-  if have rc-service; then
-    if [ ! -x /etc/init.d/hysteria-server ]; then
-      cat >/etc/init.d/hysteria-server <<EOF
-#!/sbin/openrc-run
-name="hysteria-server"
-description="Hysteria2 server for QIE"
-command="$bin"
-command_args="server -c $config"
-command_background="yes"
-pidfile="/run/hysteria-server.pid"
-
-depend() {
-  need net
-}
-EOF
-      chmod +x /etc/init.d/hysteria-server
-    fi
-    rc-update add hysteria-server default >/dev/null 2>&1 || true
-    rc-service hysteria-server restart
-    return
-  fi
-
-  if have service; then
-    service hysteria-server restart
-    return
-  fi
-
-  die "无法重启 Hysteria2：未找到 systemctl、rc-service 或 service"
-}
-
-ensure_singbox_service() {
-  config="$1"
-  bin="$2"
-
-  if [ "$NO_START" -eq 1 ]; then
-    echo "已设置 --no-start，跳过 Shadowsocks TCP 服务启动。" >&2
-    return
-  fi
-
-  if have systemctl; then
-    cat >/etc/systemd/system/qie-shadowsocks.service <<EOF
-[Unit]
-Description=QIE Shadowsocks TCP landing server
-After=network.target
-
-[Service]
-ExecStart=$bin run -c $config
-Restart=on-failure
-RestartSec=10
-LimitNOFILE=infinity
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable qie-shadowsocks >/dev/null 2>&1 || true
-    systemctl restart qie-shadowsocks
-    return
-  fi
-
-  if have rc-service; then
-    cat >/etc/init.d/qie-shadowsocks <<EOF
-#!/sbin/openrc-run
-name="qie-shadowsocks"
-description="QIE Shadowsocks TCP landing server"
-command="$bin"
-command_args="run -c $config"
-command_background="yes"
-pidfile="/run/qie-shadowsocks.pid"
-
-depend() {
-  need net
-}
-EOF
-    chmod +x /etc/init.d/qie-shadowsocks
-    rc-update add qie-shadowsocks default >/dev/null 2>&1 || true
-    rc-service qie-shadowsocks restart
-    return
-  fi
-
-  if have nohup; then
-    nohup "$bin" run -c "$config" >/var/log/qie-shadowsocks.log 2>&1 &
-    echo "未找到服务管理器，已用后台进程启动 Shadowsocks TCP。" >&2
-    return
-  fi
-
-  die "无法启动 Shadowsocks TCP：未找到 systemctl、rc-service 或可用的后台启动方式"
-}
-
-restart_hysteria_service() {
-  if [ "$NO_START" -eq 1 ]; then
-    echo "已设置 --no-start，跳过 Hysteria2 重启。" >&2
-    return
-  fi
-
-  if have systemctl; then
-    for svc in hysteria-server hysteria; do
-      if systemctl cat "$svc.service" >/dev/null 2>&1; then
-        systemctl restart "$svc.service"
-        return
-      fi
-    done
-  fi
-
-  if have rc-service; then
-    for svc in hysteria-server hysteria; do
-      if [ -x "/etc/init.d/$svc" ]; then
-        rc-service "$svc" restart
-        return
-      fi
-    done
-  fi
-
-  if have service; then
-    for svc in hysteria-server hysteria; do
-      if service "$svc" status >/dev/null 2>&1; then
-        service "$svc" restart
-        return
-      fi
-    done
-  fi
-
-  warn "未找到可重启的 Hysteria2 服务，请手动重启。"
-}
-
-update_hysteria_port() {
-  config="$1"
-  new_port="$2"
-  validate_port "$new_port" "监听端口"
-  need_root
-
-  python3 - "$config" "$new_port" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-port = sys.argv[2]
-text = path.read_text(encoding='utf-8-sig')
-pattern = re.compile(r'(?m)^(\s*listen\s*:\s*)([^#\n]*?)(\s*#.*)?$')
-
-def repl(match):
-    return f'{match.group(1)}:{port}{match.group(3) or ""}'
-
-new_text, count = pattern.subn(repl, text, count=1)
-if count == 0:
-    new_text = f'listen: :{port}\n' + text
-path.write_text(new_text, encoding='utf-8', newline='\n')
-PY
-  restart_hysteria_service
-}
-create_shadowsocks_config() {
- if ! singbox_bin >/dev/null 2>&1; then
-  install_singbox_binary
- fi
- SINGBOX="$(singbox_bin)"
- ask_ss_port
- need_root
- mkdir -p "$(dirname "$SS_CONFIG")"
- if [ -z "$PASSWORD" ]; then
-  case "$SS_METHOD" in
-   2022-blake3-aes-128-gcm) key_len=16 ;;
-   2022-blake3-aes-256-gcm|2022-blake3-chacha20-poly1305) key_len=32 ;;
-   *) key_len=0 ;;
-  esac
-  if [ "$key_len" -gt 0 ]; then
-   PASSWORD="$($SINGBOX generate rand --base64 "$key_len" 2>/dev/null || openssl rand -base64 "$key_len")"
-  else
-   PASSWORD="$(python3 - <<'PY'
-import secrets
-print(secrets.token_urlsafe(24))
-PY
-)"
-  fi
- fi
- python3 - "$SS_CONFIG" "$SS_META" "$SS_PORT" "$SS_METHOD" "$PASSWORD" <<'PY'
-import json
-import sys
-
-config_path, meta_path, port, method, password = sys.argv[1:]
-port = int(port)
-config = {
-    'log': {'level': 'info'},
-    'inbounds': [
-        {
-            'type': 'shadowsocks',
-            'tag': 'shadowsocks-in',
-            'listen': '0.0.0.0',
-            'listen_port': port,
-            'network': 'tcp',
-            'method': method,
-            'password': password,
-        }
-    ],
-    'outbounds': [
-        {'type': 'direct', 'tag': 'direct'},
-    ],
-    'route': {'final': 'direct'},
-}
-meta = {
-    'kind': 'shadowsocks',
-    'path': config_path,
+    'server': server,
     'port': port,
-    'method': method,
-    'password': password,
+    'config': config,
 }
-with open(config_path, 'w', encoding='utf-8', newline='\n') as f:
-    json.dump(config, f, ensure_ascii=False, indent=2)
-    f.write('\n')
-with open(meta_path, 'w', encoding='utf-8', newline='\n') as f:
-    json.dump(meta, f, ensure_ascii=False, indent=2)
+with open(out, 'w', encoding='utf-8', newline='\n') as f:
+    json.dump(payload, f, ensure_ascii=False, indent=2)
     f.write('\n')
 PY
- "$SINGBOX" check -c "$SS_CONFIG" >/dev/null
- ensure_singbox_service "$SS_CONFIG" "$SINGBOX"
-}
-choose_install_protocol() {
- if [ -n "$INSTALL_PROTOCOL" ]; then
-  echo "$INSTALL_PROTOCOL"
-  return
- fi
- if [ "$YES" -eq 1 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
-  echo hy2
-  return
- fi
- while :; do
-  echo "未检测到可用协议服务，请选择安装模式：" >/dev/tty
-  echo " 1) Hysteria2 / UDP" >/dev/tty
-  echo " 2) Shadowsocks TCP" >/dev/tty
-  printf "请选择 [1/2，默认 1]: " >/dev/tty
-  IFS= read -r answer </dev/tty || answer=""
-  case "$answer" in
-   1|'') echo hy2; return ;;
-   2) echo ss; return ;;
-   *) echo "请输入 1 或 2。" >/dev/tty ;;
-  esac
- done
-}
-choose_export_protocol() {
- if [ "$HY2_EXISTS" -eq 1 ] && [ "$SS_EXISTS" -eq 1 ]; then
-  if [ "$YES" -eq 1 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
-   echo hy2
-   return
-  fi
-  while :; do
-   echo "检测到多个可导出的协议，请选择导出：" >/dev/tty
-   echo " 1) Hysteria2 / UDP" >/dev/tty
-   echo " 2) Shadowsocks TCP" >/dev/tty
-   printf "请选择 [1/2，默认 1]: " >/dev/tty
-   IFS= read -r answer </dev/tty || answer=""
-   case "$answer" in
-    1|'') echo hy2; return ;;
-    2) echo ss; return ;;
-    *) echo "请输入 1 或 2。" >/dev/tty ;;
-   esac
-  done
- elif [ "$HY2_EXISTS" -eq 1 ]; then
-  echo hy2
- elif [ "$SS_EXISTS" -eq 1 ]; then
-  echo ss
- else
-  echo ""
- fi
+  echo "已生成 Shadowsocks/TCP 节点：$NAME -> $SERVER:$port" >&2
+  emit_node_block "$tmp"
+  rm -f "$tmp"
 }
 
-create_hysteria_config() {
-  ensure_hysteria_missing=0
-  if ! hysteria_bin >/dev/null 2>&1; then
-    install_hysteria_binary
-    ensure_hysteria_missing=1
-  fi
-  HYSTERIA="$(hysteria_bin)"
-  CONFIG="$(detect_existing_config)"
-
-  need_root
-  mkdir -p "$(dirname "$CONFIG")" /etc/hysteria/certs
-
-  cert="/etc/hysteria/certs/qie-hy2.crt"
-  key="/etc/hysteria/certs/qie-hy2.key"
-
-  if [ ! -f "$cert" ] || [ ! -f "$key" ]; then
-    echo "正在生成自签 TLS 证书..." >&2
-    openssl req -x509 -newkey rsa:2048 -keyout "$key" -out "$cert" -days 3650 -nodes -subj "/CN=$SNI" >/dev/null 2>&1
-    chmod 600 "$key"
-  fi
-
-  if [ -z "$PASSWORD" ]; then
-    PASSWORD="$(python3 - <<'PY'
-import secrets
-print(secrets.token_urlsafe(24))
-PY
-)"
-  fi
-
-  if [ ! -s "$CONFIG" ]; then
-    cat >"$CONFIG" <<EOF
-listen: :$PORT
-
-tls:
-  cert: $cert
-  key: $key
-
-auth:
-  type: password
-  password: $PASSWORD
-
-masquerade:
-  type: proxy
-  proxy:
-    url: https://www.bing.com/
-    rewriteHost: true
-EOF
-  fi
-
-  ensure_service "$CONFIG" "$HYSTERIA"
-}
-
-ask_node_name
-
-validate_port "$PORT" "监听端口"
-
-ensure_base_dependencies
-SERVER="$(detect_server)"
-
-DETECT_TMP="$(mktemp)"
-VLESS_TMP="$(mktemp)"
-EXPORT_TMP="$(mktemp)"
-trap 'rm -f "$DETECT_TMP" "$VLESS_TMP" "$EXPORT_TMP"' EXIT HUP INT TERM
-
-if detect_existing_hy2 "$DETECT_TMP"; then
-  HY2_EXISTS=1
-else
-  HY2_EXISTS=0
-fi
-
-if detect_existing_shadowsocks "$VLESS_TMP"; then
-  SS_EXISTS=1
-else
-  SS_EXISTS=0
-fi
-
-if singbox_exists; then
-  SINGBOX_EXISTS=1
-else
-  SINGBOX_EXISTS=0
-fi
-
-BBR_CURRENT="$(bbr_current)"
-BBR_AVAILABLE="$(bbr_available)"
-
-echo "========================"
-echo " QIE 落地机检测"
-echo "========================"
-if [ "$HY2_EXISTS" -eq 1 ]; then
-  echo "hy2: 有 ($(json_field "$DETECT_TMP" kind), $(json_field "$DETECT_TMP" path), 端口 $(json_field "$DETECT_TMP" port))"
-  DETECTED_SNI="$(json_field "$DETECT_TMP" sni)"
-  if [ -n "$DETECTED_SNI" ]; then
-    echo "SNI: $DETECTED_SNI"
+print_detect_result() {
+  hy2_file="$1"
+  ss_file="$2"
+  echo "========================" >&2
+  echo " 落地机协议检测" >&2
+  echo "========================" >&2
+  if [ "$HY2_EXISTS" -eq 1 ]; then
+    echo "Hysteria2/UDP: 已检测到 $(json_field "$hy2_file" path) :$(json_field "$hy2_file" port)" >&2
   else
-    echo "SNI: $SNI (未从配置识别，使用默认/参数)"
+    echo "Hysteria2/UDP: 未检测到" >&2
   fi
-else
-  echo "hy2: 无"
-fi
-if [ "$SS_EXISTS" -eq 1 ]; then
-  echo "Shadowsocks TCP: 有 ($(json_field "$VLESS_TMP" path), TCP 端口 $(json_field "$VLESS_TMP" port), 握手域名 $(json_field "$VLESS_TMP" server_name))"
-else
-  echo "Shadowsocks TCP: 无"
-fi
-if [ "$SINGBOX_EXISTS" -eq 1 ]; then
-  echo "sing-box: 有"
-else
-  echo "sing-box: 无"
-fi
-echo "BBR: 当前=$BBR_CURRENT 可用=$BBR_AVAILABLE"
-echo "连接地址: $SERVER"
-echo "========================"
-
-if [ "$HY2_EXISTS" -eq 1 ] && [ "$(json_field "$DETECT_TMP" kind)" = "hysteria" ]; then
-  if ask_yes_no "是否修改 hy2 监听端口" "n" 0; then
-    CURRENT_PORT="$(json_field "$DETECT_TMP" port)"
-    PORT="$(ask_port_value "请输入新的 Hysteria2 监听 UDP 端口" "$CURRENT_PORT")"
-    update_hysteria_port "$(json_field "$DETECT_TMP" path)" "$PORT"
-    if detect_existing_hy2 "$DETECT_TMP"; then
-      HY2_EXISTS=1
-      echo "hy2 端口已更新为: $(json_field "$DETECT_TMP" port)"
-    else
-      HY2_EXISTS=0
-      warn "修改端口后未检测到 hy2，请检查配置和服务状态。"
-    fi
+  if [ "$SS_EXISTS" -eq 1 ]; then
+    echo "Shadowsocks/TCP: 已检测到 $(json_field "$ss_file" path) :$(json_field "$ss_file" port)" >&2
+  else
+    echo "Shadowsocks/TCP: 未检测到" >&2
   fi
-elif [ "$HY2_EXISTS" -eq 1 ] && [ "$(json_field "$DETECT_TMP" kind)" = "sing-box" ]; then
-  echo "提示: 检测到 sing-box 内置 hy2，luodi 不自动修改 sing-box 端口。"
-fi
+  echo "========================" >&2
+}
 
-if [ "$BBR_CURRENT" != "bbr" ]; then
-  if ask_yes_no "现在安装/启用 BBR" "n" 0; then
-    if ! install_bbr; then
-      warn "BBR 工具失败，或被容器/宿主机限制；继续执行后续步骤。"
-    fi
-    BBR_CURRENT="$(bbr_current)"
-    echo "BBR 执行后: 当前=$BBR_CURRENT"
-  fi
-fi
+main() {
+  ensure_base_dependencies
+  ask_node_name
 
-if [ "$HY2_EXISTS" -eq 0 ]; then
-  if [ "$SS_EXISTS" -eq 0 ]; then
-    SELECTED_PROTOCOL="$(choose_install_protocol)"
-    case "$SELECTED_PROTOCOL" in
-      hy2)
-        if ask_yes_no "现在安装 Hysteria2 / UDP" "n"; then
-          ask_hysteria_port
-          create_hysteria_config
-          if detect_existing_hy2 "$DETECT_TMP"; then
-            HY2_EXISTS=1
-          fi
-        fi
-        ;;
-      ss)
-        if ask_yes_no "现在安装 Shadowsocks TCP / TCP" "n"; then
-          create_shadowsocks_config
-          if detect_existing_shadowsocks "$VLESS_TMP"; then
-            SS_EXISTS=1
-          fi
-        fi
-        ;;
+  hy2_file="$(mktemp)"
+  ss_file="$(mktemp)"
+  HY2_EXISTS=0
+  SS_EXISTS=0
+  if detect_existing_hy2 "$hy2_file" >/dev/null 2>&1; then HY2_EXISTS=1; fi
+  if detect_existing_shadowsocks "$ss_file" >/dev/null 2>&1; then SS_EXISTS=1; fi
+  print_detect_result "$hy2_file" "$ss_file"
+
+  if [ "$HY2_EXISTS" -eq 0 ] && [ "$SS_EXISTS" -eq 0 ]; then
+    protocol="$(choose_install_protocol)"
+    case "$protocol" in
+      hy2) create_hysteria_config ;;
+      ss) create_shadowsocks_config ;;
+      *) die "内部错误：未知协议 $protocol" ;;
     esac
+    rm -f "$hy2_file" "$ss_file"
+    hy2_file="$(mktemp)"
+    ss_file="$(mktemp)"
+    HY2_EXISTS=0
+    SS_EXISTS=0
+    if detect_existing_hy2 "$hy2_file" >/dev/null 2>&1; then HY2_EXISTS=1; fi
+    if detect_existing_shadowsocks "$ss_file" >/dev/null 2>&1; then SS_EXISTS=1; fi
+    print_detect_result "$hy2_file" "$ss_file"
   fi
-fi
 
-EXPORT_PROTOCOL="$(choose_export_protocol)"
-if [ -z "$EXPORT_PROTOCOL" ]; then
-  warn "没有可用协议服务，无法导出。"
-  cleanup_after_export
-  exit 0
-fi
-
-if ask_yes_no "现在导出 QIE 导入数据" "y"; then
-  case "$EXPORT_PROTOCOL" in
+  export_protocol="$(choose_export_protocol)"
+  case "$export_protocol" in
     hy2)
-      emit_export \
-        "$(json_field "$DETECT_TMP" path)" \
-        "$(json_field "$DETECT_TMP" port)" \
-        "$(json_field "$DETECT_TMP" password)" \
-        "$(json_field "$DETECT_TMP" sni)" \
-        "$EXPORT_TMP"
+      if [ "$HY2_EXISTS" -ne 1 ]; then die "没有可导出的 Hysteria2 配置"; fi
+      export_hysteria "$hy2_file"
       ;;
     ss)
-      emit_shadowsocks_export \
-        "$(json_field "$VLESS_TMP" path)" \
-        "$(json_field "$VLESS_TMP" port)" \
-        "$(json_field "$VLESS_TMP" uuid)" \
-        "$(json_field "$VLESS_TMP" public_key)" \
-        "$(json_field "$VLESS_TMP" short_id)" \
-        "$(json_field "$VLESS_TMP" server_name)" \
-        "$EXPORT_TMP"
+      if [ "$SS_EXISTS" -ne 1 ]; then die "没有可导出的 Shadowsocks 配置"; fi
+      export_shadowsocks "$ss_file"
       ;;
-    *)
-      die "未知导出协议: $EXPORT_PROTOCOL"
-      ;;
+    *) die "没有可导出的协议配置" ;;
   esac
-  cat "$EXPORT_TMP"
-else
-  echo "已跳过导出。"
-fi
 
-cleanup_after_export
+  rm -f "$hy2_file" "$ss_file"
+  cleanup_after_export
+}
+
+main "$@"
