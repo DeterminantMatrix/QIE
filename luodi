@@ -352,6 +352,20 @@ singbox_bin() {
   return 1
 }
 
+ensure_alpine_singbox_runtime() {
+  bin="${1:-/usr/local/bin/sing-box}"
+  [ "$(detect_pm)" = "apk" ] || return 0
+  "$bin" version >/dev/null 2>&1 && return 0
+
+  echo "检测到 Alpine，正在安装 sing-box 运行兼容依赖..." >&2
+  apk add --no-cache gcompat libgcc >/dev/null 2>&1 || apk add --no-cache libc6-compat libgcc >/dev/null
+
+  if [ "$(arch_name)" = "amd64" ] && [ ! -e /lib64/ld-linux-x86-64.so.2 ] && [ -e /lib/ld-linux-x86-64.so.2 ]; then
+    mkdir -p /lib64
+    ln -sf /lib/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
+  fi
+}
+
 install_singbox_binary() {
   need_root
   arch="$(arch_name)"
@@ -366,6 +380,8 @@ install_singbox_binary() {
   cp "$bin_path" /usr/local/bin/sing-box
   chmod 755 /usr/local/bin/sing-box
   rm -rf "$tmp_dir"
+  ensure_alpine_singbox_runtime /usr/local/bin/sing-box
+  /usr/local/bin/sing-box version >/dev/null 2>&1 || die "sing-box 已安装但无法运行；请检查系统架构或手动安装 glibc/gcompat 兼容库"
 }
 
 detect_server() {
@@ -878,6 +894,8 @@ create_shadowsocks_config() {
     install_singbox_binary
   fi
   SINGBOX="$(singbox_bin)"
+  ensure_alpine_singbox_runtime "$SINGBOX"
+  "$SINGBOX" version >/dev/null 2>&1 || die "sing-box 已存在但无法运行；请检查系统架构或手动安装 glibc/gcompat 兼容库"
   ask_ss_port
   need_root
   mkdir -p "$(dirname "$SS_CONFIG")"
