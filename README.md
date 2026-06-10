@@ -1,6 +1,6 @@
 # QIE
 
-`qie` 是一个用于管理和切换落地机出口的命令行脚本。原机器运行 sing-box 服务端入站，落地机可使用 Hysteria2/UDP 或 VLESS + Reality/TCP 承接出口流量。
+`qie` 是一个用于管理和切换落地机出口的命令行脚本。原机器运行 sing-box 服务端入站，落地机可使用 Hysteria2/UDP 或 Shadowsocks TCP 承接出口流量。
 
 它不主动 SSH 到落地机。正确流程是：
 
@@ -62,7 +62,7 @@ curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$
 导出脚本会先显示检测结果：
 
 - 是否已有 hy2
-- 是否已有 QIE 管理的 VLESS + Reality
+- 是否已有 QIE 管理的 Shadowsocks TCP
 - 是否已有 sing-box
 - 当前 BBR 状态
 - 自动探测到的落地机连接地址
@@ -70,7 +70,7 @@ curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$
 然后逐项询问：
 
 - 是否安装/启用 BBR
-- 如果没有可用协议服务，选择安装 Hysteria2/UDP 或 VLESS + Reality/TCP
+- 如果没有可用协议服务，选择安装 Hysteria2/UDP 或 Shadowsocks TCP
 - 是否导出 `QIE_NODE_BEGIN` 数据块
 
 导出脚本会在落地机上执行这些动作：
@@ -88,11 +88,11 @@ bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main
 
 4. 优先检测已有 Hysteria2 独立服务端配置。
 5. 如果没有 Hysteria2 配置，再检测已有 sing-box 配置中的 `hysteria2` / `hy2` inbound。
-6. 检测 QIE 管理的 VLESS + Reality 服务配置。
+6. 检测 QIE 管理的 Shadowsocks TCP 服务配置。
 7. 如果检测到已有协议服务，会直接生成导入数据，不重复安装。
-8. 如果没有任何可用协议服务，会让你选择安装 Hysteria2/UDP 或 VLESS + Reality/TCP。
+8. 如果没有任何可用协议服务，会让你选择安装 Hysteria2/UDP 或 Shadowsocks TCP。
 9. 选择 Hysteria2 时，从 Hysteria GitHub Release 下载二进制，自动生成自签 TLS 证书、随机密码和 Hysteria2 服务端配置。
-10. 选择 VLESS + Reality 时，从 sing-box GitHub Release 下载二进制，创建独立的 `/etc/sing-box/qie-vless-reality.json`，不覆盖已有 sing-box 主配置。
+10. 选择 Shadowsocks TCP 时，从 sing-box GitHub Release 下载二进制，创建独立的 `/etc/sing-box/qie-shadowsocks.json`，不覆盖已有 sing-box 主配置。
 11. 启动或重启对应协议服务。
 12. 输出原机器可粘贴导入的 `QIE_NODE_BEGIN` 数据块。这个数据块里是原机器 sing-box 使用的 outbound 配置。
 13. 清理本脚本的临时文件；在 Alpine 上，如果 `curl`、`python3`、`openssl` 是本脚本临时安装的，会在导出完成后尝试移除。
@@ -111,10 +111,10 @@ curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$
 curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node -y
 ```
 
-如果要在无协议服务的机器上直接安装 VLESS + Reality/TCP：
+如果要在无协议服务的机器上直接安装 Shadowsocks TCP：
 
 ```sh
-curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node --protocol vless --vless-port 443 --reality-server www.microsoft.com
+curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node --protocol ss --ss-port 8388
 ```
 
 命令会输出类似下面的数据块：
@@ -125,7 +125,7 @@ QIE_NODE_BEGIN
 QIE_NODE_END
 ```
 
-导出数据会写入 `test_protocol`。Hysteria2 / TUIC 这类 UDP 协议会按 UDP 节点处理；VLESS + Reality 会按 TCP 节点处理，避免在 `qie` 菜单中使用错误的测速方式。
+导出数据会写入 `test_protocol`。Hysteria2 / TUIC 这类 UDP 协议会按 UDP 节点处理；Shadowsocks TCP 会按 TCP 节点处理，避免在 `qie` 菜单中使用错误的测速方式。
 
 如果落地机已经安装了第三方 Hysteria2，`luodi` 会从现有配置或证书中提取端口、密码和 SNI。比如 Alpine 脚本安装的 hy2 使用 `www.bing.com` 作为证书域名时，导出的 sing-box 客户端配置会写入 `tls.server_name: www.bing.com`，并设置 `tls.alpn: ["h3"]`，不会再使用默认的 `qie.local`。
 
@@ -184,10 +184,10 @@ curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$
 
 如果已经检测到独立 Hysteria2，`luodi` 会询问是否修改 hy2 监听端口；确认后会修改配置中的 `listen` 端口并重启 Hysteria2 服务。
 
-如果要指定 VLESS + Reality TCP 端口：
+如果要指定 Shadowsocks TCP 端口：
 
 ```sh
-curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node --protocol vless --vless-port 443
+curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node --protocol ss --ss-port 8388
 ```
 
 ## 前置条件
@@ -196,7 +196,7 @@ curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$
 - 原机器使用 `systemd` 或 OpenRC
 - 原机器已安装 `sing-box`
 - 原机器 sing-box 服务名为 `sing-box`
-- 落地机需要开放所选协议端口：Hysteria2 默认 `8443/udp`，VLESS + Reality 默认 `443/tcp`
+- 落地机需要开放所选协议端口：Hysteria2 默认 `8443/udp`，Shadowsocks TCP 默认 `8388/tcp`
 - `qie` 需要 root 权限运行
 
 `qie` 在原机器上使用以下路径：

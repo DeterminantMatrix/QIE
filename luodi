@@ -5,18 +5,18 @@ NAME=""
 CONFIG="/etc/hysteria/config.yaml"
 PORT="8443"
 PORT_SET=0
-VLESS_PORT="443"
-VLESS_PORT_SET=0
+SS_PORT="8388"
+SS_PORT_SET=0
 SERVER=""
 PASSWORD=""
 SNI="qie.local"
-REALITY_SERVER_NAME="www.microsoft.com"
+SS_METHOD="2022-blake3-aes-128-gcm"
 INSTALL_PROTOCOL=""
 NO_START=0
 KEEP_DEPS=0
 YES=0
-VLESS_CONFIG="/etc/sing-box/qie-vless-reality.json"
-VLESS_META="/etc/sing-box/qie-vless-reality.meta.json"
+SS_CONFIG="/etc/sing-box/qie-shadowsocks.json"
+SS_META="/etc/sing-box/qie-shadowsocks.meta.json"
 
 usage() {
   cat <<'EOF'
@@ -27,9 +27,9 @@ usage() {
   -n, --name NAME          qie 菜单中显示的节点名称
   -c, --config FILE        Hysteria2 服务端配置路径，默认 /etc/hysteria/config.yaml
   -p, --port PORT          Hysteria2 监听端口，默认 8443
-  --vless-port PORT        VLESS + Reality TCP 监听端口，默认 443
+  --vless-port PORT        Shadowsocks TCP TCP 监听端口，默认 443
   --reality-server NAME    Reality 握手伪装域名，默认 www.microsoft.com
-  --protocol MODE          没有协议服务时安装的模式：hy2 或 vless
+  --protocol MODE          没有协议服务时安装的模式：hy2 或 ss
   --server HOST            原机器连接落地机时使用的公网地址/IP
   --password PASSWORD      Hysteria2 密码；不填则自动生成
   --sni NAME               TLS SNI，默认 qie.local
@@ -39,7 +39,7 @@ usage() {
   -h, --help               显示帮助
 
 在落地机上运行。本脚本会先显示检测结果；如果没有可用协议服务，
-会让你选择 Hysteria2/UDP 或 VLESS + Reality/TCP。
+会让你选择 Hysteria2/UDP 或 Shadowsocks TCP。
 EOF
 }
 
@@ -181,20 +181,22 @@ ask_hysteria_port() {
   fi
   validate_port "$PORT" "监听端口"
 }
-
-ask_vless_port() {
-  if [ "$VLESS_PORT_SET" -eq 0 ]; then
-    VLESS_PORT="$(ask_port_value "请输入 VLESS + Reality 监听 TCP 端口" "$VLESS_PORT")"
-  fi
-  validate_port "$VLESS_PORT" "VLESS + Reality 监听端口"
+ask_ss_port() {
+ if [ "$SS_PORT_SET" -eq 0 ]; then
+  SS_PORT="$(ask_port_value "请输入 Shadowsocks TCP 监听端口" "$SS_PORT")"
+ fi
+ validate_port "$SS_PORT" "Shadowsocks TCP 监听端口"
 }
-
 normalize_protocol() {
-  case "$1" in
-    hy2|hysteria|hysteria2|udp) echo hy2 ;;
-    vless|reality|vless-reality|tcp) echo vless ;;
-    *) die "无效协议模式: $1，请使用 hy2 或 vless" ;;
-  esac
+ case "$1" in
+  hy2|hysteria|hysteria2|udp) echo hy2 ;;
+  ss|shadowsocks|shadowsocks-tcp|tcp) echo ss ;;
+  vless|reality|vless-reality)
+   warn "Shadowsocks TCP TCP 已替换为 Shadowsocks TCP，继续使用 ss"
+   echo ss
+   ;;
+  *) die "无效协议模式: $1，请使用 hy2 或 ss" ;;
+ esac
 }
 
 while [ "$#" -gt 0 ]; do
@@ -217,13 +219,8 @@ while [ "$#" -gt 0 ]; do
       ;;
     --vless-port)
       [ "$#" -ge 2 ] || die "$1 需要参数值"
-      VLESS_PORT="$2"
-      VLESS_PORT_SET=1
-      shift 2
-      ;;
-    --reality-server)
-      [ "$#" -ge 2 ] || die "$1 需要参数值"
-      REALITY_SERVER_NAME="$2"
+      SS_PORT="$2"
+      SS_PORT_SET=1
       shift 2
       ;;
     --protocol|--mode)
@@ -673,24 +670,20 @@ write({'kind': '', 'path': '', 'port': '', 'password': '', 'sni': ''})
 raise SystemExit(2)
 PY
 }
-
-detect_existing_vless_reality() {
-  out="$1"
-  python3 - "$out" "$VLESS_META" <<'PY'
+detect_existing_shadowsocks() {
+ out="$1"
+ python3 - "$out" "$SS_META" <<'PY'
 import json
 import os
 import sys
 
 out, meta_path = sys.argv[1:3]
-
 empty = {
     'kind': '',
     'path': '',
     'port': '',
-    'uuid': '',
-    'public_key': '',
-    'short_id': '',
-    'server_name': '',
+    'method': '',
+    'password': '',
 }
 
 def write(result):
@@ -709,7 +702,7 @@ except Exception:
     write(empty)
     raise SystemExit(2)
 
-required = ('path', 'port', 'uuid', 'public_key', 'short_id', 'server_name')
+required = ('path', 'port', 'method', 'password')
 if not all(data.get(k) for k in required):
     write(empty)
     raise SystemExit(2)
@@ -718,7 +711,7 @@ if not os.path.isfile(str(data.get('path'))):
     write(empty)
     raise SystemExit(2)
 
-data['kind'] = 'vless-reality'
+data['kind'] = 'shadowsocks'
 write(data)
 raise SystemExit(0)
 PY
@@ -832,23 +825,27 @@ with open(out, 'w', encoding='utf-8', newline='\n') as f:
     f.write('QIE_NODE_END\n')
 PY
 }
-
-emit_vless_reality_export() {
-  source_path="$1"
-  port="$2"
-  uuid="$3"
-  public_key="$4"
-  short_id="$5"
-  server_name="$6"
+emit_shadowsocks_export() {
+ source_path="$1"
+ port="$2"
+ if [ "$#" -eq 7 ]; then
+  # Backward-compatible call shape after the old VLESS export call has been renamed.
+  method="$(json_field "$SS_INFO" method)"
+  password="$(json_field "$SS_INFO" password)"
   out="$7"
-  python3 - "$SERVER" "$server_name" "$NAME" "$source_path" "$port" "$uuid" "$public_key" "$short_id" "$out" <<'PY'
+ else
+  method="$3"
+  password="$4"
+  out="$5"
+ fi
+ python3 - "$SERVER" "$NAME" "$source_path" "$port" "$method" "$password" "$out" <<'PY'
 import base64
 import json
 import socket
 import sys
 import time
 
-server, server_name, name, source_path, port, uuid, public_key, short_id, out = sys.argv[1:]
+server, name, source_path, port, method, password, out = sys.argv[1:]
 port = int(port)
 client_config = {
     'log': {'level': 'info'},
@@ -862,26 +859,13 @@ client_config = {
     ],
     'outbounds': [
         {
-            'type': 'vless',
+            'type': 'shadowsocks',
             'tag': 'proxy',
             'server': server,
             'server_port': port,
-            'uuid': uuid,
-            'flow': 'xtls-rprx-vision',
+            'method': method,
+            'password': password,
             'network': 'tcp',
-            'tls': {
-                'enabled': True,
-                'server_name': server_name,
-                'utls': {
-                    'enabled': True,
-                    'fingerprint': 'chrome',
-                },
-                'reality': {
-                    'enabled': True,
-                    'public_key': public_key,
-                    'short_id': short_id,
-                },
-            },
         },
         {'type': 'direct', 'tag': 'direct'},
     ],
@@ -896,8 +880,8 @@ payload = {
     'exported_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
     'server': server,
     'server_port': port,
-    'reality_server': server_name,
-    'protocol': 'vless-reality',
+    'method': method,
+    'protocol': 'shadowsocks',
     'test_protocol': 'tcp',
     'config': client_config,
 }
@@ -992,14 +976,14 @@ ensure_singbox_service() {
   bin="$2"
 
   if [ "$NO_START" -eq 1 ]; then
-    echo "已设置 --no-start，跳过 VLESS + Reality 服务启动。" >&2
+    echo "已设置 --no-start，跳过 Shadowsocks TCP 服务启动。" >&2
     return
   fi
 
   if have systemctl; then
-    cat >/etc/systemd/system/qie-vless-reality.service <<EOF
+    cat >/etc/systemd/system/qie-shadowsocks.service <<EOF
 [Unit]
-Description=QIE VLESS Reality landing server
+Description=QIE Shadowsocks TCP landing server
 After=network.target
 
 [Service]
@@ -1012,38 +996,38 @@ LimitNOFILE=infinity
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
-    systemctl enable qie-vless-reality >/dev/null 2>&1 || true
-    systemctl restart qie-vless-reality
+    systemctl enable qie-shadowsocks >/dev/null 2>&1 || true
+    systemctl restart qie-shadowsocks
     return
   fi
 
   if have rc-service; then
-    cat >/etc/init.d/qie-vless-reality <<EOF
+    cat >/etc/init.d/qie-shadowsocks <<EOF
 #!/sbin/openrc-run
-name="qie-vless-reality"
-description="QIE VLESS Reality landing server"
+name="qie-shadowsocks"
+description="QIE Shadowsocks TCP landing server"
 command="$bin"
 command_args="run -c $config"
 command_background="yes"
-pidfile="/run/qie-vless-reality.pid"
+pidfile="/run/qie-shadowsocks.pid"
 
 depend() {
   need net
 }
 EOF
-    chmod +x /etc/init.d/qie-vless-reality
-    rc-update add qie-vless-reality default >/dev/null 2>&1 || true
-    rc-service qie-vless-reality restart
+    chmod +x /etc/init.d/qie-shadowsocks
+    rc-update add qie-shadowsocks default >/dev/null 2>&1 || true
+    rc-service qie-shadowsocks restart
     return
   fi
 
   if have nohup; then
-    nohup "$bin" run -c "$config" >/var/log/qie-vless-reality.log 2>&1 &
-    echo "未找到服务管理器，已用后台进程启动 VLESS + Reality。" >&2
+    nohup "$bin" run -c "$config" >/var/log/qie-shadowsocks.log 2>&1 &
+    echo "未找到服务管理器，已用后台进程启动 Shadowsocks TCP。" >&2
     return
   fi
 
-  die "无法启动 VLESS + Reality：未找到 systemctl、rc-service 或可用的后台启动方式"
+  die "无法启动 Shadowsocks TCP：未找到 systemctl、rc-service 或可用的后台启动方式"
 }
 
 restart_hysteria_service() {
@@ -1108,59 +1092,47 @@ path.write_text(new_text, encoding='utf-8', newline='\n')
 PY
   restart_hysteria_service
 }
-
-create_vless_reality_config() {
-  if ! singbox_bin >/dev/null 2>&1; then
-    install_singbox_binary
+create_shadowsocks_config() {
+ if ! singbox_bin >/dev/null 2>&1; then
+  install_singbox_binary
+ fi
+ SINGBOX="$(singbox_bin)"
+ ask_ss_port
+ need_root
+ mkdir -p "$(dirname "$SS_CONFIG")"
+ if [ -z "$PASSWORD" ]; then
+  case "$SS_METHOD" in
+   2022-blake3-aes-128-gcm) key_len=16 ;;
+   2022-blake3-aes-256-gcm|2022-blake3-chacha20-poly1305) key_len=32 ;;
+   *) key_len=0 ;;
+  esac
+  if [ "$key_len" -gt 0 ]; then
+   PASSWORD="$($SINGBOX generate rand --base64 "$key_len" 2>/dev/null || openssl rand -base64 "$key_len")"
+  else
+   PASSWORD="$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(24))
+PY
+)"
   fi
-  SINGBOX="$(singbox_bin)"
-  ask_vless_port
-
-  need_root
-  mkdir -p "$(dirname "$VLESS_CONFIG")"
-
-  uuid="$("$SINGBOX" generate uuid 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())')"
-  keypair="$("$SINGBOX" generate reality-keypair)"
-  private_key="$(printf "%s\n" "$keypair" | awk -F: 'tolower($1) ~ /private/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}')"
-  public_key="$(printf "%s\n" "$keypair" | awk -F: 'tolower($1) ~ /public/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}')"
-  [ -n "$private_key" ] || die "无法生成 Reality private key"
-  [ -n "$public_key" ] || die "无法生成 Reality public key"
-  short_id="$(openssl rand -hex 8)"
-
-  python3 - "$VLESS_CONFIG" "$VLESS_META" "$VLESS_PORT" "$uuid" "$private_key" "$public_key" "$short_id" "$REALITY_SERVER_NAME" <<'PY'
+ fi
+ python3 - "$SS_CONFIG" "$SS_META" "$SS_PORT" "$SS_METHOD" "$PASSWORD" <<'PY'
 import json
 import sys
 
-config_path, meta_path, port, uuid, private_key, public_key, short_id, server_name = sys.argv[1:]
+config_path, meta_path, port, method, password = sys.argv[1:]
 port = int(port)
-
 config = {
     'log': {'level': 'info'},
     'inbounds': [
         {
-            'type': 'vless',
-            'tag': 'vless-reality-in',
+            'type': 'shadowsocks',
+            'tag': 'shadowsocks-in',
             'listen': '0.0.0.0',
             'listen_port': port,
-            'users': [
-                {
-                    'uuid': uuid,
-                    'flow': 'xtls-rprx-vision',
-                }
-            ],
-            'tls': {
-                'enabled': True,
-                'server_name': server_name,
-                'reality': {
-                    'enabled': True,
-                    'handshake': {
-                        'server': server_name,
-                        'server_port': 443,
-                    },
-                    'private_key': private_key,
-                    'short_id': [short_id],
-                },
-            },
+            'network': 'tcp',
+            'method': method,
+            'password': password,
         }
     ],
     'outbounds': [
@@ -1168,17 +1140,13 @@ config = {
     ],
     'route': {'final': 'direct'},
 }
-
 meta = {
-    'kind': 'vless-reality',
+    'kind': 'shadowsocks',
     'path': config_path,
     'port': port,
-    'uuid': uuid,
-    'public_key': public_key,
-    'short_id': short_id,
-    'server_name': server_name,
+    'method': method,
+    'password': password,
 }
-
 with open(config_path, 'w', encoding='utf-8', newline='\n') as f:
     json.dump(config, f, ensure_ascii=False, indent=2)
     f.write('\n')
@@ -1186,61 +1154,56 @@ with open(meta_path, 'w', encoding='utf-8', newline='\n') as f:
     json.dump(meta, f, ensure_ascii=False, indent=2)
     f.write('\n')
 PY
-
-  "$SINGBOX" check -c "$VLESS_CONFIG" >/dev/null
-  ensure_singbox_service "$VLESS_CONFIG" "$SINGBOX"
+ "$SINGBOX" check -c "$SS_CONFIG" >/dev/null
+ ensure_singbox_service "$SS_CONFIG" "$SINGBOX"
 }
-
 choose_install_protocol() {
-  if [ -n "$INSTALL_PROTOCOL" ]; then
-    echo "$INSTALL_PROTOCOL"
-    return
-  fi
-
-  if [ "$YES" -eq 1 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
-    echo hy2
-    return
-  fi
-
-  while :; do
-    echo "未检测到可用协议服务，请选择安装模式：" >/dev/tty
-    echo "  1) Hysteria2 / UDP" >/dev/tty
-    echo "  2) VLESS + Reality / TCP" >/dev/tty
-    printf "请选择 [1/2，默认 1]: " >/dev/tty
-    IFS= read -r answer </dev/tty || answer=""
-    case "$answer" in
-      ''|1|hy2|hysteria|hysteria2|udp) echo hy2; return ;;
-      2|vless|reality|tcp) echo vless; return ;;
-      *) echo "请输入 1 或 2。" >/dev/tty ;;
-    esac
-  done
+ if [ -n "$INSTALL_PROTOCOL" ]; then
+  echo "$INSTALL_PROTOCOL"
+  return
+ fi
+ if [ "$YES" -eq 1 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+  echo hy2
+  return
+ fi
+ while :; do
+  echo "未检测到可用协议服务，请选择安装模式：" >/dev/tty
+  echo " 1) Hysteria2 / UDP" >/dev/tty
+  echo " 2) Shadowsocks TCP" >/dev/tty
+  printf "请选择 [1/2，默认 1]: " >/dev/tty
+  IFS= read -r answer </dev/tty || answer=""
+  case "$answer" in
+   1|'') echo hy2; return ;;
+   2) echo ss; return ;;
+   *) echo "请输入 1 或 2。" >/dev/tty ;;
+  esac
+ done
 }
-
 choose_export_protocol() {
-  if [ "$HY2_EXISTS" -eq 1 ] && [ "$VLESS_EXISTS" -eq 1 ]; then
-    if [ "$YES" -eq 1 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
-      echo hy2
-      return
-    fi
-    while :; do
-      echo "检测到多个可导出的协议，请选择导出：" >/dev/tty
-      echo "  1) Hysteria2 / UDP" >/dev/tty
-      echo "  2) VLESS + Reality / TCP" >/dev/tty
-      printf "请选择 [1/2，默认 1]: " >/dev/tty
-      IFS= read -r answer </dev/tty || answer=""
-      case "$answer" in
-        ''|1|hy2|hysteria|hysteria2|udp) echo hy2; return ;;
-        2|vless|reality|tcp) echo vless; return ;;
-        *) echo "请输入 1 或 2。" >/dev/tty ;;
-      esac
-    done
-  elif [ "$HY2_EXISTS" -eq 1 ]; then
-    echo hy2
-  elif [ "$VLESS_EXISTS" -eq 1 ]; then
-    echo vless
-  else
-    echo ""
+ if [ "$HY2_EXISTS" -eq 1 ] && [ "$SS_EXISTS" -eq 1 ]; then
+  if [ "$YES" -eq 1 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+   echo hy2
+   return
   fi
+  while :; do
+   echo "检测到多个可导出的协议，请选择导出：" >/dev/tty
+   echo " 1) Hysteria2 / UDP" >/dev/tty
+   echo " 2) Shadowsocks TCP" >/dev/tty
+   printf "请选择 [1/2，默认 1]: " >/dev/tty
+   IFS= read -r answer </dev/tty || answer=""
+   case "$answer" in
+    1|'') echo hy2; return ;;
+    2) echo ss; return ;;
+    *) echo "请输入 1 或 2。" >/dev/tty ;;
+   esac
+  done
+ elif [ "$HY2_EXISTS" -eq 1 ]; then
+  echo hy2
+ elif [ "$SS_EXISTS" -eq 1 ]; then
+  echo ss
+ else
+  echo ""
+ fi
 }
 
 create_hysteria_config() {
@@ -1313,10 +1276,10 @@ else
   HY2_EXISTS=0
 fi
 
-if detect_existing_vless_reality "$VLESS_TMP"; then
-  VLESS_EXISTS=1
+if detect_existing_shadowsocks "$VLESS_TMP"; then
+  SS_EXISTS=1
 else
-  VLESS_EXISTS=0
+  SS_EXISTS=0
 fi
 
 if singbox_exists; then
@@ -1342,10 +1305,10 @@ if [ "$HY2_EXISTS" -eq 1 ]; then
 else
   echo "hy2: 无"
 fi
-if [ "$VLESS_EXISTS" -eq 1 ]; then
-  echo "VLESS + Reality: 有 ($(json_field "$VLESS_TMP" path), TCP 端口 $(json_field "$VLESS_TMP" port), 握手域名 $(json_field "$VLESS_TMP" server_name))"
+if [ "$SS_EXISTS" -eq 1 ]; then
+  echo "Shadowsocks TCP: 有 ($(json_field "$VLESS_TMP" path), TCP 端口 $(json_field "$VLESS_TMP" port), 握手域名 $(json_field "$VLESS_TMP" server_name))"
 else
-  echo "VLESS + Reality: 无"
+  echo "Shadowsocks TCP: 无"
 fi
 if [ "$SINGBOX_EXISTS" -eq 1 ]; then
   echo "sing-box: 有"
@@ -1384,7 +1347,7 @@ if [ "$BBR_CURRENT" != "bbr" ]; then
 fi
 
 if [ "$HY2_EXISTS" -eq 0 ]; then
-  if [ "$VLESS_EXISTS" -eq 0 ]; then
+  if [ "$SS_EXISTS" -eq 0 ]; then
     SELECTED_PROTOCOL="$(choose_install_protocol)"
     case "$SELECTED_PROTOCOL" in
       hy2)
@@ -1396,11 +1359,11 @@ if [ "$HY2_EXISTS" -eq 0 ]; then
           fi
         fi
         ;;
-      vless)
-        if ask_yes_no "现在安装 VLESS + Reality / TCP" "n"; then
-          create_vless_reality_config
-          if detect_existing_vless_reality "$VLESS_TMP"; then
-            VLESS_EXISTS=1
+      ss)
+        if ask_yes_no "现在安装 Shadowsocks TCP / TCP" "n"; then
+          create_shadowsocks_config
+          if detect_existing_shadowsocks "$VLESS_TMP"; then
+            SS_EXISTS=1
           fi
         fi
         ;;
@@ -1425,8 +1388,8 @@ if ask_yes_no "现在导出 QIE 导入数据" "y"; then
         "$(json_field "$DETECT_TMP" sni)" \
         "$EXPORT_TMP"
       ;;
-    vless)
-      emit_vless_reality_export \
+    ss)
+      emit_shadowsocks_export \
         "$(json_field "$VLESS_TMP" path)" \
         "$(json_field "$VLESS_TMP" port)" \
         "$(json_field "$VLESS_TMP" uuid)" \
