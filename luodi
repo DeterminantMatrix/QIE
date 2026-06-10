@@ -19,6 +19,8 @@ SS_METHOD="2022-blake3-aes-128-gcm"
 SS_CONFIG="/etc/sing-box/qie-shadowsocks.json"
 SS_META="/etc/sing-box/qie-shadowsocks.meta.json"
 SS_SERVICE="qie-shadowsocks"
+DEFAULT_HYSTERIA_VERSION="2.9.2"
+DEFAULT_SING_BOX_VERSION="1.13.13"
 
 usage() {
   cat <<'USAGE'
@@ -337,22 +339,8 @@ hysteria_bin() {
 install_hysteria_binary() {
   need_root
   arch="$(arch_name)"
-  url="$(python3 - "$arch" <<'PY'
-import json
-import sys
-import urllib.request
-arch = sys.argv[1]
-with urllib.request.urlopen('https://api.github.com/repos/apernet/hysteria/releases/latest', timeout=20) as r:
-    data = json.load(r)
-target = f'hysteria-linux-{arch}'
-for asset in data.get('assets', []):
-    if asset.get('name') == target:
-        print(asset['browser_download_url'])
-        break
-else:
-    raise SystemExit(f'未找到适用于 {arch} 的 Hysteria2 Linux 二进制')
-PY
-)"
+  version="${HYSTERIA_VERSION:-$DEFAULT_HYSTERIA_VERSION}"
+  url="${HYSTERIA_URL:-https://github.com/apernet/hysteria/releases/download/app/v${version}/hysteria-linux-${arch}}"
   echo "正在安装 Hysteria2 二进制..." >&2
   curl -fsSL "$url" -o /usr/local/bin/hysteria
   chmod 755 /usr/local/bin/hysteria
@@ -367,23 +355,8 @@ singbox_bin() {
 install_singbox_binary() {
   need_root
   arch="$(arch_name)"
-  url="$(python3 - "$arch" <<'PY'
-import json
-import sys
-import urllib.request
-arch = sys.argv[1]
-with urllib.request.urlopen('https://api.github.com/repos/SagerNet/sing-box/releases/latest', timeout=20) as r:
-    data = json.load(r)
-suffix = f'linux-{arch}.tar.gz'
-for asset in data.get('assets', []):
-    name = asset.get('name', '')
-    if name.endswith(suffix):
-        print(asset['browser_download_url'])
-        break
-else:
-    raise SystemExit(f'未找到适用于 {arch} 的 sing-box Linux 压缩包')
-PY
-)"
+  version="${SING_BOX_VERSION:-$DEFAULT_SING_BOX_VERSION}"
+  url="${SING_BOX_URL:-https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}.tar.gz}"
   tmp_dir="$(mktemp -d)"
   echo "正在安装 sing-box 二进制..." >&2
   curl -fsSL "$url" -o "$tmp_dir/sing-box.tar.gz"

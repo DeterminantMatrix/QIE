@@ -1288,12 +1288,23 @@ def usage():
     print('  qie test')
 
 
+def is_root():
+    geteuid = getattr(os, 'geteuid', None)
+    if geteuid is None:
+        return False
+    return geteuid() == 0
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1].strip().lower() in ('version', '-v', '--version'):
         print('QIE ' + VERSION)
         return
 
-    if os.geteuid() != 0:
+    if len(sys.argv) > 1 and sys.argv[1].strip().lower() in ('help', '-h', '--help'):
+        usage()
+        return
+
+    if not is_root():
         die('错误: 请用 root 执行')
 
     os.makedirs(CDIR, exist_ok=True)
@@ -1323,8 +1334,6 @@ def main():
         print_status()
     elif low in ('test', 't'):
         print_test()
-    elif low in ('help', '-h', '--help'):
-        usage()
     else:
         node = None
         if low.isdigit():
