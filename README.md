@@ -1,13 +1,6 @@
 # QIE
 
-`qie` 是一个用于管理和切换落地机出口的命令行脚本。原机器运行 sing-box 服务端入站，落地机可使用 Hysteria2/UDP 或 Shadowsocks TCP 承接出口流量。
-
-它不主动 SSH 到落地机。正确流程是：
-
-1. 在落地机 SSH 中执行导出命令，生成 `QIE_NODE_BEGIN` / `QIE_NODE_END` 数据块。
-2. 回到原机器运行 `sudo qie` 或 `sudo qie add`。
-3. 粘贴落地机生成的数据块。
-4. `qie` 自动保存该落地机出口配置和测速协议，之后可以在菜单中切换并查看延迟。
+`qie` 用来在原机器上管理和切换落地机出口。落地机不需要被原机器 SSH 登录；你只需要在落地机 SSH 里运行 `luodi`，复制生成的 `QIE_NODE` 数据块，再回到原机器用 `qie add` 导入。
 
 ## 安装 qie
 
@@ -23,272 +16,15 @@ Alpine：
 apk add --no-cache curl python3 && tmp=$(mktemp) && curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie?$(date +%s)" -o "$tmp" && install -m 755 "$tmp" /usr/local/bin/qie && rm -f "$tmp"
 ```
 
-安装后首次运行：
+首次运行：
 
 ```bash
 sudo qie
 ```
 
-第一次使用时，`qie` 默认没有任何落地机配置，会提示粘贴落地机导出的数据块。
-
-## 在落地机生成导入数据
-
-在落地机 SSH 中执行：
+## 更新 qie
 
 Debian / Ubuntu：
-
-```bash
-sudo apt update && sudo apt install -y curl python3 && curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sudo sh
-```
-
-Alpine：
-
-```sh
-apk add --no-cache curl python3 && curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh
-```
-
-Alpine/LXC 机器无法可靠自动获取公网 IP。`luodi` 检测到 Alpine 时会要求输入落地机公网 IP 或域名；也可以直接用 `--server` 指定：
-
-```sh
-curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node --server 1.2.3.4
-```
-
-如果没有用 `-n` 指定名称，脚本会要求你为这台落地机起名，并把这个名字写入 `QIE_NODE` 数据块。也可以直接指定：
-
-```sh
-curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node
-```
-
-导出脚本会先显示检测结果：
-
-- 是否已有 hy2
-- 是否已有 QIE 管理的 Shadowsocks TCP
-- 是否已有 sing-box
-- 当前 BBR 状态
-- 自动探测到的落地机连接地址
-
-然后逐项询问：
-
-- 是否安装/启用 BBR
-- 如果没有可用协议服务，选择安装 Hysteria2/UDP 或 Shadowsocks TCP
-- 是否导出 `QIE_NODE_BEGIN` 数据块
-
-导出脚本会在落地机上执行这些动作：
-
-1. 检测 `python3`、`curl`、`openssl`。
-2. 如果缺少基础依赖，会用当前系统的包管理器安装。
-3. 检测 BBR 当前状态；如果你确认安装/启用 BBR，会调用成熟的 `vps-tcp-tune` 脚本：
-
-```bash
-bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/install-alias.sh?$(date +%s)")
-bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/net-tcp-tune.sh?$(date +%s)")
-```
-
-第一行会安装以后手动使用的 `bbr` 快捷命令；第二行会在本次脚本中直接运行 BBR 工具，避免 `curl | sh` 环境里 alias 不生效。
-
-4. 优先检测已有 Hysteria2 独立服务端配置。
-5. 如果没有 Hysteria2 配置，再检测已有 sing-box 配置中的 `hysteria2` / `hy2` inbound。
-6. 检测 QIE 管理的 Shadowsocks TCP 服务配置。
-7. 如果检测到已有协议服务，会直接生成导入数据，不重复安装。
-8. 如果没有任何可用协议服务，会让你选择安装 Hysteria2/UDP 或 Shadowsocks TCP。
-9. 选择 Hysteria2 时，从 Hysteria GitHub Release 下载二进制，自动生成自签 TLS 证书、随机密码和 Hysteria2 服务端配置。
-10. 选择 Shadowsocks TCP 时，从 sing-box GitHub Release 下载二进制，创建独立的 `/etc/sing-box/qie-shadowsocks.json`，不覆盖已有 sing-box 主配置。
-11. 启动或重启对应协议服务。
-12. 输出原机器可粘贴导入的 `QIE_NODE_BEGIN` 数据块。这个数据块里是原机器 sing-box 使用的 outbound 配置。
-13. 清理本脚本的临时文件；在 Alpine 上，如果 `curl`、`python3`、`openssl` 是本脚本临时安装的，会在导出完成后尝试移除。
-
-Hysteria2 或 sing-box 二进制、服务文件、配置和证书是落地机运行所必需的，不会删除。
-
-如果希望保留本脚本安装的辅助依赖：
-
-```sh
-curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node --keep-deps
-```
-
-如果需要非交互模式，自动确认安装缺失协议并导出。默认安装 Hysteria2/UDP；BBR 不会在 `-y` 下自动启用，仍需交互确认：
-
-```sh
-curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node -y
-```
-
-如果要在无协议服务的机器上直接安装 Shadowsocks TCP：
-
-```sh
-curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node --protocol ss --ss-port 8388
-```
-
-命令会输出类似下面的数据块：
-
-```text
-QIE_NODE_BEGIN
-...
-QIE_NODE_END
-```
-
-导出数据会写入 `test_protocol`。Hysteria2 / TUIC 这类 UDP 协议会按 UDP 节点处理；Shadowsocks TCP 会按 TCP 节点处理，避免在 `qie` 菜单中使用错误的测速方式。
-
-如果落地机已经安装了第三方 Hysteria2，`luodi` 会从现有配置或证书中提取端口、密码和 SNI。比如 Alpine 脚本安装的 hy2 使用 `www.bing.com` 作为证书域名时，导出的 sing-box 客户端配置会写入 `tls.server_name: www.bing.com`，并设置 `tls.alpn: ["h3"]`，不会再使用默认的 `qie.local`。
-
-复制整段输出，回到原机器执行：
-
-```bash
-sudo qie add
-```
-
-然后粘贴整段数据块即可。
-
-导出脚本会自动尝试以下 Hysteria2 配置路径：
-
-- `/etc/hysteria/config.yaml`
-- `/etc/hysteria/config.yml`
-- `/etc/hysteria/*.yaml`
-- `/etc/hysteria/*.yml`
-
-如果都不存在，会创建 `/etc/hysteria/config.yaml`。
-
-同时也会检测以下 sing-box 配置路径中的 `hysteria2` / `hy2` inbound：
-
-- `/etc/s-box/sb.json`
-- `/etc/sing-box/config.json`
-- `/usr/local/etc/sing-box/config.json`
-- `/etc/s-box/*.json`
-- `/etc/sing-box/*.json`
-
-如果想手动指定落地机上的 Hysteria2 服务端配置路径：
-
-Debian / Ubuntu：
-
-```bash
-curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sudo sh -s -- -n my-node -c /path/to/config.yaml
-```
-
-Alpine：
-
-```sh
-curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node -c /path/to/config.yaml
-```
-
-如果自动探测的公网 IP 不正确，手动指定原机器连接落地机时使用的地址：
-
-```sh
-curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node --server 1.2.3.4
-```
-
-如果要指定 hy2 端口：
-
-```sh
-curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node -p 8443
-```
-
-如果未检测到 hy2，`luodi` 在交互安装独立 Hysteria2 时会询问监听端口。LXC 机器需要填写面板允许的 UDP 端口。
-
-如果已经检测到独立 Hysteria2，`luodi` 会询问是否修改 hy2 监听端口；确认后会修改配置中的 `listen` 端口并重启 Hysteria2 服务。
-
-如果要指定 Shadowsocks TCP 端口：
-
-```sh
-curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node --protocol ss --ss-port 8388
-```
-
-## 前置条件
-
-- 原机器和落地机都需要 `python3`
-- 原机器使用 `systemd` 或 OpenRC
-- 原机器已安装 `sing-box`
-- 原机器 sing-box 服务名为 `sing-box`
-- 落地机需要开放所选协议端口：Hysteria2 默认 `8443/udp`，Shadowsocks TCP 默认 `8388/tcp`
-- `qie` 需要 root 权限运行
-
-`qie` 在原机器上使用以下路径：
-
-| 路径 | 用途 |
-| --- | --- |
-| `/etc/s-box/sb.json` | 当前运行配置 |
-| `/etc/s-box/qie_nodes/` | 导入的落地机配置 |
-| `/etc/s-box/qie_nodes.json` | 节点索引 |
-| `/etc/s-box/qie_state` | 当前模式状态 |
-| `/etc/s-box/sb_direct.json` | 旧版 Direct 配置，保留兼容 |
-
-切换节点时，`qie` 不会把落地机客户端配置整体覆盖到 `/etc/s-box/sb.json`。它会读取当前运行配置，保留原有 `inbounds`、已有 `outbounds` 和 `route.rules`，只替换由 `qie` 管理的 `qie-proxy` 出口，并把 `route.final` 指向当前落地机。切回 Direct 时只把 `route.final` 改回 `direct`。
-
-切换到落地机并重启 `sing-box` 后，`qie` 会临时启动一个 sing-box 客户端，通过该落地机访问 `https://www.gstatic.com/generate_204`。如果出站检测失败或超时，会自动把当前配置回退到 Direct 并重启 `sing-box`。
-
-如果重启 `sing-box` 失败，`qie` 会尝试回滚到切换前的配置。
-
-## 用法
-
-交互菜单：
-
-```bash
-sudo qie
-```
-
-录入落地机：
-
-```bash
-sudo qie add
-```
-
-修改落地机名称：
-
-```bash
-sudo qie rename 1 新名称
-sudo qie rename my-node 新名称
-```
-
-删除落地机：
-
-```bash
-sudo qie delete 1
-sudo qie delete my-node
-```
-
-查看节点：
-
-```bash
-sudo qie list
-```
-
-查看版本：
-
-```bash
-qie version
-```
-
-按编号或名称切换：
-
-```bash
-sudo qie 1
-sudo qie my-node
-```
-
-切换 Direct：
-
-```bash
-sudo qie direct
-```
-
-查看状态：
-
-```bash
-sudo qie status
-```
-
-测速：
-
-```bash
-sudo qie test
-```
-
-延迟显示说明：
-
-- `sudo qie` 和 `sudo qie list` 中，HY2 / TUIC 节点显示的是 ICMP 延迟，即本机到落地机 IP 的基础网络延迟。
-- `sudo qie test` 会额外启动一个临时 sing-box 客户端，通过该落地机访问 `https://www.gstatic.com/generate_204`，显示 `出站`耗时。该测试不修改 `/etc/s-box/sb.json`，结束后会关闭临时进程。
-- 如果落地机禁 ping，会显示 `ICMP: 不可用`，但 `出站`测试仍可用于判断 HY2 链路是否可用。
-
-## 更新
-
-更新 `qie`：
 
 ```bash
 tmp=$(mktemp) && curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie?$(date +%s)" -o "$tmp" && if [ -f /usr/local/bin/qie ] && cmp -s "$tmp" /usr/local/bin/qie; then echo "qie 已是最新"; rm -f "$tmp"; else sudo install -m 755 "$tmp" /usr/local/bin/qie && rm -f "$tmp" && echo "qie 已更新"; fi
@@ -299,6 +35,81 @@ Alpine：
 ```sh
 tmp=$(mktemp) && curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/qie?$(date +%s)" -o "$tmp" && if [ -f /usr/local/bin/qie ] && cmp -s "$tmp" /usr/local/bin/qie; then echo "qie 已是最新"; rm -f "$tmp"; else install -m 755 "$tmp" /usr/local/bin/qie && rm -f "$tmp" && echo "qie 已更新"; fi
 ```
+
+## 生成落地机导入数据
+
+在落地机 SSH 中运行：
+
+Debian / Ubuntu：
+
+```bash
+sudo apt update && sudo apt install -y curl python3 && curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sudo sh
+```
+
+Alpine / LXC：
+
+```sh
+apk add --no-cache curl python3 && curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh
+```
+
+Alpine / LXC 公网 IP 经常无法自动识别，建议直接指定：
+
+```sh
+apk add --no-cache curl python3 && curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node --server 1.2.3.4
+```
+
+如果落地机没有可用协议服务，`luodi` 会让你选择：
+
+- `Hysteria2 / UDP`
+- `Shadowsocks TCP`
+
+直接安装 Shadowsocks TCP：
+
+```sh
+curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node --protocol ss --ss-port 8388
+```
+
+直接安装 Hysteria2，并指定 UDP 端口：
+
+```sh
+curl -fsSL "https://raw.githubusercontent.com/DeterminantMatrix/QIE/main/luodi?$(date +%s)" | sh -s -- -n my-node --protocol hy2 -p 8443
+```
+
+运行完成后复制整段输出：
+
+```text
+QIE_NODE_BEGIN
+...
+QIE_NODE_END
+```
+
+回到原机器导入：
+
+```bash
+sudo qie add
+```
+
+## 常用命令
+
+```bash
+sudo qie              # 打开交互菜单
+sudo qie add          # 导入落地机
+sudo qie list         # 查看节点和延迟
+sudo qie 1            # 切换到第 1 个节点
+sudo qie direct       # 切回直连
+sudo qie test         # 测试节点出站
+sudo qie rename 1 新名称
+sudo qie delete 1
+qie version
+```
+
+## 说明
+
+- `qie` 运行在原机器上，需要 root 权限。
+- 原机器需要已安装并运行 `sing-box`。
+- `qie` 切换节点时不会覆盖原有入站，只会替换自己管理的出站。
+- 切换节点后会检测是否能出站；失败会自动回退到 Direct。
+- 落地机端口需要在面板或防火墙中放行：Hy2 默认 `8443/udp`，Shadowsocks 默认 `8388/tcp`。
 
 ## 卸载
 
