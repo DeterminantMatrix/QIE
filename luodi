@@ -5,12 +5,18 @@ NAME=""
 CONFIG="/etc/hysteria/config.yaml"
 PORT="8443"
 PORT_SET=0
+VLESS_PORT="443"
+VLESS_PORT_SET=0
 SERVER=""
 PASSWORD=""
 SNI="qie.local"
+REALITY_SERVER_NAME="www.microsoft.com"
+INSTALL_PROTOCOL=""
 NO_START=0
 KEEP_DEPS=0
 YES=0
+VLESS_CONFIG="/etc/sing-box/qie-vless-reality.json"
+VLESS_META="/etc/sing-box/qie-vless-reality.meta.json"
 
 usage() {
   cat <<'EOF'
@@ -21,16 +27,19 @@ usage() {
   -n, --name NAME          qie 菜单中显示的节点名称
   -c, --config FILE        Hysteria2 服务端配置路径，默认 /etc/hysteria/config.yaml
   -p, --port PORT          Hysteria2 监听端口，默认 8443
+  --vless-port PORT        VLESS + Reality TCP 监听端口，默认 443
+  --reality-server NAME    Reality 握手伪装域名，默认 www.microsoft.com
+  --protocol MODE          没有协议服务时安装的模式：hy2 或 vless
   --server HOST            原机器连接落地机时使用的公网地址/IP
   --password PASSWORD      Hysteria2 密码；不填则自动生成
   --sni NAME               TLS SNI，默认 qie.local
   --no-start               写入配置和导出数据，但不重启 Hysteria2
   --keep-deps              保留本脚本安装的辅助依赖
-  -y, --yes                非交互：自动安装缺失 hy2 并导出
+  -y, --yes                非交互：自动安装缺失协议并导出
   -h, --help               显示帮助
 
-在落地机上运行。本脚本会先显示检测结果，再询问是否安装 Hysteria2、
-是否启用 BBR、是否导出 QIE_NODE 数据块。
+在落地机上运行。本脚本会先显示检测结果；如果没有可用协议服务，
+会让你选择 Hysteria2/UDP 或 VLESS + Reality/TCP。
 EOF
 }
 
@@ -173,6 +182,21 @@ ask_hysteria_port() {
   validate_port "$PORT" "监听端口"
 }
 
+ask_vless_port() {
+  if [ "$VLESS_PORT_SET" -eq 0 ]; then
+    VLESS_PORT="$(ask_port_value "请输入 VLESS + Reality 监听 TCP 端口" "$VLESS_PORT")"
+  fi
+  validate_port "$VLESS_PORT" "VLESS + Reality 监听端口"
+}
+
+normalize_protocol() {
+  case "$1" in
+    hy2|hysteria|hysteria2|udp) echo hy2 ;;
+    vless|reality|vless-reality|tcp) echo vless ;;
+    *) die "无效协议模式: $1，请使用 hy2 或 vless" ;;
+  esac
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -n|--name)
@@ -189,6 +213,22 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || die "$1 需要参数值"
       PORT="$2"
       PORT_SET=1
+      shift 2
+      ;;
+    --vless-port)
+      [ "$#" -ge 2 ] || die "$1 需要参数值"
+      VLESS_PORT="$2"
+      VLESS_PORT_SET=1
+      shift 2
+      ;;
+    --reality-server)
+      [ "$#" -ge 2 ] || die "$1 需要参数值"
+      REALITY_SERVER_NAME="$2"
+      shift 2
+      ;;
+    --protocol|--mode)
+      [ "$#" -ge 2 ] || die "$1 需要参数值"
+      INSTALL_PROTOCOL="$(normalize_protocol "$2")"
       shift 2
       ;;
     --server)
@@ -349,6 +389,51 @@ PY
   echo "正在安装 Hysteria2 二进制..." >&2
   curl -fsSL "$url" -o /usr/local/bin/hysteria
   chmod 755 /usr/local/bin/hysteria
+}
+
+singbox_bin() {
+  if have sing-box; then
+    command -v sing-box
+    return
+  fi
+  if [ -x /usr/local/bin/sing-box ]; then
+    echo /usr/local/bin/sing-box
+    return
+  fi
+  return 1
+}
+
+install_singbox_binary() {
+  need_root
+  arch="$(arch_name)"
+  url="$(python3 - "$arch" <<'PY'
+import json
+import sys
+import urllib.request
+
+arch = sys.argv[1]
+with urllib.request.urlopen('https://api.github.com/repos/SagerNet/sing-box/releases/latest', timeout=20) as r:
+    data = json.load(r)
+
+suffix = f'linux-{arch}.tar.gz'
+for asset in data.get('assets', []):
+    name = asset.get('name', '')
+    if name.endswith(suffix):
+        print(asset['browser_download_url'])
+        break
+else:
+    raise SystemExit(f'未找到适用于 {arch} 的 sing-box Linux 压缩包')
+PY
+)"
+  tmp_dir="$(mktemp -d)"
+  echo "正在安装 sing-box 二进制..." >&2
+  curl -fsSL "$url" -o "$tmp_dir/sing-box.tar.gz"
+  tar -xzf "$tmp_dir/sing-box.tar.gz" -C "$tmp_dir"
+  bin_path="$(find "$tmp_dir" -type f -name sing-box | head -n 1)"
+  [ -n "$bin_path" ] || die "sing-box 压缩包中未找到二进制文件"
+  cp "$bin_path" /usr/local/bin/sing-box
+  chmod 755 /usr/local/bin/sing-box
+  rm -rf "$tmp_dir"
 }
 
 detect_server() {
@@ -589,6 +674,56 @@ raise SystemExit(2)
 PY
 }
 
+detect_existing_vless_reality() {
+  out="$1"
+  python3 - "$out" "$VLESS_META" <<'PY'
+import json
+import os
+import sys
+
+out, meta_path = sys.argv[1:3]
+
+empty = {
+    'kind': '',
+    'path': '',
+    'port': '',
+    'uuid': '',
+    'public_key': '',
+    'short_id': '',
+    'server_name': '',
+}
+
+def write(result):
+    with open(out, 'w', encoding='utf-8', newline='\n') as f:
+        json.dump(result, f, ensure_ascii=False)
+        f.write('\n')
+
+if not os.path.isfile(meta_path):
+    write(empty)
+    raise SystemExit(2)
+
+try:
+    with open(meta_path, 'r', encoding='utf-8-sig') as f:
+        data = json.load(f)
+except Exception:
+    write(empty)
+    raise SystemExit(2)
+
+required = ('path', 'port', 'uuid', 'public_key', 'short_id', 'server_name')
+if not all(data.get(k) for k in required):
+    write(empty)
+    raise SystemExit(2)
+
+if not os.path.isfile(str(data.get('path'))):
+    write(empty)
+    raise SystemExit(2)
+
+data['kind'] = 'vless-reality'
+write(data)
+raise SystemExit(0)
+PY
+}
+
 json_field() {
   file="$1"
   key="$2"
@@ -698,6 +833,84 @@ with open(out, 'w', encoding='utf-8', newline='\n') as f:
 PY
 }
 
+emit_vless_reality_export() {
+  source_path="$1"
+  port="$2"
+  uuid="$3"
+  public_key="$4"
+  short_id="$5"
+  server_name="$6"
+  out="$7"
+  python3 - "$SERVER" "$server_name" "$NAME" "$source_path" "$port" "$uuid" "$public_key" "$short_id" "$out" <<'PY'
+import base64
+import json
+import socket
+import sys
+import time
+
+server, server_name, name, source_path, port, uuid, public_key, short_id, out = sys.argv[1:]
+port = int(port)
+client_config = {
+    'log': {'level': 'info'},
+    'inbounds': [
+        {
+            'type': 'mixed',
+            'tag': 'mixed-in',
+            'listen': '127.0.0.1',
+            'listen_port': 2080,
+        }
+    ],
+    'outbounds': [
+        {
+            'type': 'vless',
+            'tag': 'proxy',
+            'server': server,
+            'server_port': port,
+            'uuid': uuid,
+            'flow': 'xtls-rprx-vision',
+            'network': 'tcp',
+            'tls': {
+                'enabled': True,
+                'server_name': server_name,
+                'utls': {
+                    'enabled': True,
+                    'fingerprint': 'chrome',
+                },
+                'reality': {
+                    'enabled': True,
+                    'public_key': public_key,
+                    'short_id': short_id,
+                },
+            },
+        },
+        {'type': 'direct', 'tag': 'direct'},
+    ],
+    'route': {'rules': [], 'final': 'proxy'},
+}
+payload = {
+    'format': 'qie-node',
+    'version': 1,
+    'name': name,
+    'source_host': socket.gethostname(),
+    'source_config': source_path,
+    'exported_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
+    'server': server,
+    'server_port': port,
+    'reality_server': server_name,
+    'protocol': 'vless-reality',
+    'test_protocol': 'tcp',
+    'config': client_config,
+}
+raw = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+encoded = base64.b64encode(raw).decode('ascii')
+with open(out, 'w', encoding='utf-8', newline='\n') as f:
+    f.write('QIE_NODE_BEGIN\n')
+    for i in range(0, len(encoded), 76):
+        f.write(encoded[i:i + 76] + '\n')
+    f.write('QIE_NODE_END\n')
+PY
+}
+
 detect_existing_config() {
   if [ -f "$CONFIG" ]; then
     echo "$CONFIG"
@@ -774,6 +987,65 @@ EOF
   die "无法重启 Hysteria2：未找到 systemctl、rc-service 或 service"
 }
 
+ensure_singbox_service() {
+  config="$1"
+  bin="$2"
+
+  if [ "$NO_START" -eq 1 ]; then
+    echo "已设置 --no-start，跳过 VLESS + Reality 服务启动。" >&2
+    return
+  fi
+
+  if have systemctl; then
+    cat >/etc/systemd/system/qie-vless-reality.service <<EOF
+[Unit]
+Description=QIE VLESS Reality landing server
+After=network.target
+
+[Service]
+ExecStart=$bin run -c $config
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable qie-vless-reality >/dev/null 2>&1 || true
+    systemctl restart qie-vless-reality
+    return
+  fi
+
+  if have rc-service; then
+    cat >/etc/init.d/qie-vless-reality <<EOF
+#!/sbin/openrc-run
+name="qie-vless-reality"
+description="QIE VLESS Reality landing server"
+command="$bin"
+command_args="run -c $config"
+command_background="yes"
+pidfile="/run/qie-vless-reality.pid"
+
+depend() {
+  need net
+}
+EOF
+    chmod +x /etc/init.d/qie-vless-reality
+    rc-update add qie-vless-reality default >/dev/null 2>&1 || true
+    rc-service qie-vless-reality restart
+    return
+  fi
+
+  if have nohup; then
+    nohup "$bin" run -c "$config" >/var/log/qie-vless-reality.log 2>&1 &
+    echo "未找到服务管理器，已用后台进程启动 VLESS + Reality。" >&2
+    return
+  fi
+
+  die "无法启动 VLESS + Reality：未找到 systemctl、rc-service 或可用的后台启动方式"
+}
+
 restart_hysteria_service() {
   if [ "$NO_START" -eq 1 ]; then
     echo "已设置 --no-start，跳过 Hysteria2 重启。" >&2
@@ -837,6 +1109,140 @@ PY
   restart_hysteria_service
 }
 
+create_vless_reality_config() {
+  if ! singbox_bin >/dev/null 2>&1; then
+    install_singbox_binary
+  fi
+  SINGBOX="$(singbox_bin)"
+  ask_vless_port
+
+  need_root
+  mkdir -p "$(dirname "$VLESS_CONFIG")"
+
+  uuid="$("$SINGBOX" generate uuid 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())')"
+  keypair="$("$SINGBOX" generate reality-keypair)"
+  private_key="$(printf "%s\n" "$keypair" | awk -F: 'tolower($1) ~ /private/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}')"
+  public_key="$(printf "%s\n" "$keypair" | awk -F: 'tolower($1) ~ /public/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}')"
+  [ -n "$private_key" ] || die "无法生成 Reality private key"
+  [ -n "$public_key" ] || die "无法生成 Reality public key"
+  short_id="$(openssl rand -hex 8)"
+
+  python3 - "$VLESS_CONFIG" "$VLESS_META" "$VLESS_PORT" "$uuid" "$private_key" "$public_key" "$short_id" "$REALITY_SERVER_NAME" <<'PY'
+import json
+import sys
+
+config_path, meta_path, port, uuid, private_key, public_key, short_id, server_name = sys.argv[1:]
+port = int(port)
+
+config = {
+    'log': {'level': 'info'},
+    'inbounds': [
+        {
+            'type': 'vless',
+            'tag': 'vless-reality-in',
+            'listen': '0.0.0.0',
+            'listen_port': port,
+            'users': [
+                {
+                    'uuid': uuid,
+                    'flow': 'xtls-rprx-vision',
+                }
+            ],
+            'tls': {
+                'enabled': True,
+                'server_name': server_name,
+                'reality': {
+                    'enabled': True,
+                    'handshake': {
+                        'server': server_name,
+                        'server_port': 443,
+                    },
+                    'private_key': private_key,
+                    'short_id': [short_id],
+                },
+            },
+        }
+    ],
+    'outbounds': [
+        {'type': 'direct', 'tag': 'direct'},
+    ],
+    'route': {'final': 'direct'},
+}
+
+meta = {
+    'kind': 'vless-reality',
+    'path': config_path,
+    'port': port,
+    'uuid': uuid,
+    'public_key': public_key,
+    'short_id': short_id,
+    'server_name': server_name,
+}
+
+with open(config_path, 'w', encoding='utf-8', newline='\n') as f:
+    json.dump(config, f, ensure_ascii=False, indent=2)
+    f.write('\n')
+with open(meta_path, 'w', encoding='utf-8', newline='\n') as f:
+    json.dump(meta, f, ensure_ascii=False, indent=2)
+    f.write('\n')
+PY
+
+  "$SINGBOX" check -c "$VLESS_CONFIG" >/dev/null
+  ensure_singbox_service "$VLESS_CONFIG" "$SINGBOX"
+}
+
+choose_install_protocol() {
+  if [ -n "$INSTALL_PROTOCOL" ]; then
+    echo "$INSTALL_PROTOCOL"
+    return
+  fi
+
+  if [ "$YES" -eq 1 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+    echo hy2
+    return
+  fi
+
+  while :; do
+    echo "未检测到可用协议服务，请选择安装模式：" >/dev/tty
+    echo "  1) Hysteria2 / UDP" >/dev/tty
+    echo "  2) VLESS + Reality / TCP" >/dev/tty
+    printf "请选择 [1/2，默认 1]: " >/dev/tty
+    IFS= read -r answer </dev/tty || answer=""
+    case "$answer" in
+      ''|1|hy2|hysteria|hysteria2|udp) echo hy2; return ;;
+      2|vless|reality|tcp) echo vless; return ;;
+      *) echo "请输入 1 或 2。" >/dev/tty ;;
+    esac
+  done
+}
+
+choose_export_protocol() {
+  if [ "$HY2_EXISTS" -eq 1 ] && [ "$VLESS_EXISTS" -eq 1 ]; then
+    if [ "$YES" -eq 1 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+      echo hy2
+      return
+    fi
+    while :; do
+      echo "检测到多个可导出的协议，请选择导出：" >/dev/tty
+      echo "  1) Hysteria2 / UDP" >/dev/tty
+      echo "  2) VLESS + Reality / TCP" >/dev/tty
+      printf "请选择 [1/2，默认 1]: " >/dev/tty
+      IFS= read -r answer </dev/tty || answer=""
+      case "$answer" in
+        ''|1|hy2|hysteria|hysteria2|udp) echo hy2; return ;;
+        2|vless|reality|tcp) echo vless; return ;;
+        *) echo "请输入 1 或 2。" >/dev/tty ;;
+      esac
+    done
+  elif [ "$HY2_EXISTS" -eq 1 ]; then
+    echo hy2
+  elif [ "$VLESS_EXISTS" -eq 1 ]; then
+    echo vless
+  else
+    echo ""
+  fi
+}
+
 create_hysteria_config() {
   ensure_hysteria_missing=0
   if ! hysteria_bin >/dev/null 2>&1; then
@@ -887,8 +1293,6 @@ EOF
   fi
 
   ensure_service "$CONFIG" "$HYSTERIA"
-  DETECT_TMP="$(mktemp)"
-  detect_existing_hy2 "$DETECT_TMP" || true
 }
 
 ask_node_name
@@ -899,13 +1303,20 @@ ensure_base_dependencies
 SERVER="$(detect_server)"
 
 DETECT_TMP="$(mktemp)"
+VLESS_TMP="$(mktemp)"
 EXPORT_TMP="$(mktemp)"
-trap 'rm -f "$DETECT_TMP" "$EXPORT_TMP"' EXIT HUP INT TERM
+trap 'rm -f "$DETECT_TMP" "$VLESS_TMP" "$EXPORT_TMP"' EXIT HUP INT TERM
 
 if detect_existing_hy2 "$DETECT_TMP"; then
   HY2_EXISTS=1
 else
   HY2_EXISTS=0
+fi
+
+if detect_existing_vless_reality "$VLESS_TMP"; then
+  VLESS_EXISTS=1
+else
+  VLESS_EXISTS=0
 fi
 
 if singbox_exists; then
@@ -930,6 +1341,11 @@ if [ "$HY2_EXISTS" -eq 1 ]; then
   fi
 else
   echo "hy2: 无"
+fi
+if [ "$VLESS_EXISTS" -eq 1 ]; then
+  echo "VLESS + Reality: 有 ($(json_field "$VLESS_TMP" path), TCP 端口 $(json_field "$VLESS_TMP" port), 握手域名 $(json_field "$VLESS_TMP" server_name))"
+else
+  echo "VLESS + Reality: 无"
 fi
 if [ "$SINGBOX_EXISTS" -eq 1 ]; then
   echo "sing-box: 有"
@@ -968,28 +1384,61 @@ if [ "$BBR_CURRENT" != "bbr" ]; then
 fi
 
 if [ "$HY2_EXISTS" -eq 0 ]; then
-  if ask_yes_no "未检测到 hy2，现在安装独立 Hysteria2" "n"; then
-    ask_hysteria_port
-    create_hysteria_config
-    if detect_existing_hy2 "$DETECT_TMP"; then
-      HY2_EXISTS=1
-    fi
+  if [ "$VLESS_EXISTS" -eq 0 ]; then
+    SELECTED_PROTOCOL="$(choose_install_protocol)"
+    case "$SELECTED_PROTOCOL" in
+      hy2)
+        if ask_yes_no "现在安装 Hysteria2 / UDP" "n"; then
+          ask_hysteria_port
+          create_hysteria_config
+          if detect_existing_hy2 "$DETECT_TMP"; then
+            HY2_EXISTS=1
+          fi
+        fi
+        ;;
+      vless)
+        if ask_yes_no "现在安装 VLESS + Reality / TCP" "n"; then
+          create_vless_reality_config
+          if detect_existing_vless_reality "$VLESS_TMP"; then
+            VLESS_EXISTS=1
+          fi
+        fi
+        ;;
+    esac
   fi
 fi
 
-if [ "$HY2_EXISTS" -eq 0 ]; then
-  warn "没有可用 hy2，无法导出。"
+EXPORT_PROTOCOL="$(choose_export_protocol)"
+if [ -z "$EXPORT_PROTOCOL" ]; then
+  warn "没有可用协议服务，无法导出。"
   cleanup_after_export
   exit 0
 fi
 
 if ask_yes_no "现在导出 QIE 导入数据" "y"; then
-  emit_export \
-    "$(json_field "$DETECT_TMP" path)" \
-    "$(json_field "$DETECT_TMP" port)" \
-    "$(json_field "$DETECT_TMP" password)" \
-    "$(json_field "$DETECT_TMP" sni)" \
-    "$EXPORT_TMP"
+  case "$EXPORT_PROTOCOL" in
+    hy2)
+      emit_export \
+        "$(json_field "$DETECT_TMP" path)" \
+        "$(json_field "$DETECT_TMP" port)" \
+        "$(json_field "$DETECT_TMP" password)" \
+        "$(json_field "$DETECT_TMP" sni)" \
+        "$EXPORT_TMP"
+      ;;
+    vless)
+      emit_vless_reality_export \
+        "$(json_field "$VLESS_TMP" path)" \
+        "$(json_field "$VLESS_TMP" port)" \
+        "$(json_field "$VLESS_TMP" uuid)" \
+        "$(json_field "$VLESS_TMP" public_key)" \
+        "$(json_field "$VLESS_TMP" short_id)" \
+        "$(json_field "$VLESS_TMP" server_name)" \
+        "$EXPORT_TMP"
+      ;;
+    *)
+      die "未知导出协议: $EXPORT_PROTOCOL"
+      ;;
+  esac
   cat "$EXPORT_TMP"
 else
   echo "已跳过导出。"
